@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Base Blue Pedestal Gradients -->
+    <linearGradient id="blueBase" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+    <linearGradient id="blueBaseTop" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#60a5fa" />
+      <stop offset="100%" stop-color="#3b82f6" />
+    </linearGradient>
+
+    <!-- Hospital Building Gradients -->
+    <linearGradient id="buildingFront" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#e2e8f0" />
+    </linearGradient>
+    <linearGradient id="buildingSide" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#cbd5e1" />
+      <stop offset="100%" stop-color="#94a3b8" />
+    </linearGradient>
+
+    <!-- Orange Trim/Roof Gradients -->
+    <linearGradient id="orangeTrim" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fb923c" />
+      <stop offset="100%" stop-color="#ea580c" />
+    </linearGradient>
+
+    <!-- Windows Teal Gradient -->
+    <linearGradient id="windowTeal" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee" />
+      <stop offset="100%" stop-color="#0891b2" />
+    </linearGradient>
+
+    <!-- Medical Pin Red Gradient -->
+    <linearGradient id="redPin" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f87171" />
+      <stop offset="100%" stop-color="#dc2626" />
+    </linearGradient>
+
+    <!-- Drop Shadows -->
+    <filter id="shadowSoft" x="-10%" y="-10%" width="125%" height="125%">
+      <feDropShadow dx="0" dy="14" stdDeviation="12" flood-color="#1e293b" flood-opacity="0.25" />
+    </filter>
+    <filter id="shadowPin" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="-6" dy="12" stdDeviation="10" flood-color="#0f172a" flood-opacity="0.32" />
+    </filter>
+  </defs>
+
+  <!-- Background Soft Blue Rounded Square Base (Isometric Pedestal) -->
+  <g filter="url(#shadowSoft)">
+    <!-- Base Depth Layer -->
+    <rect x="56" y="360" width="400" height="96" rx="44" fill="url(#blueBase)" />
+    <!-- Base Top Surface -->
+    <rect x="56" y="330" width="400" height="96" rx="44" fill="url(#blueBaseTop)" />
+    <path d="M 100 334 C 80 334, 66 348, 66 368 L 66 384 C 66 364, 80 350, 100 350 L 412 350 C 432 350, 446 364, 446 384 L 446 368 C 446 348, 432 334, 412 334 Z" fill="#93c5fd" opacity="0.4" />
+  </g>
+
+  <!-- Orange Bottom Foundation for Hospital -->
+  <path d="M 110 330 L 330 330 L 330 365 L 110 365 Z" fill="url(#orangeTrim)" rx="8" />
+  <path d="M 330 330 L 390 330 L 390 355 L 330 355 Z" fill="#c2410c" />
+
+  <!-- Main Hospital Building Structure -->
+  <g filter="url(#shadowSoft)">
+    <!-- Front Facade -->
+    <rect x="120" y="140" width="200" height="196" rx="14" fill="url(#buildingFront)" />
+    <!-- Right Side Wall -->
+    <path d="M 320 154 L 380 154 L 380 336 L 320 336 Z" fill="url(#buildingSide)" />
+    <!-- Roof Top Edge -->
+    <path d="M 120 140 L 320 140 L 380 154 L 140 154 Z" fill="#f8fafc" />
+
+    <!-- Orange Roof Cube Accent -->
+    <rect x="200" y="98" width="76" height="42" rx="10" fill="url(#orangeTrim)" />
+    <path d="M 276 108 L 306 114 L 306 140 L 276 140 Z" fill="#c2410c" />
+    <path d="M 200 98 L 276 98 L 306 114 L 230 114 Z" fill="#fdba74" />
+
+    <!-- Windows - Column 1 -->
+    <rect x="144" y="170" width="42" height="42" rx="6" fill="url(#windowTeal)" />
+    <rect x="144" y="230" width="42" height="42" rx="6" fill="url(#windowTeal)" />
+
+    <!-- Windows - Column 2 -->
+    <rect x="204" y="170" width="42" height="42" rx="6" fill="url(#windowTeal)" />
+    <rect x="204" y="230" width="42" height="42" rx="6" fill="url(#windowTeal)" />
+
+    <!-- Hospital Front Door -->
+    <rect x="264" y="250" width="44" height="86" rx="8" fill="#ef4444" />
+    <!-- Door glass detail -->
+    <rect x="274" y="260" width="24" height="52" rx="4" fill="#fca5a5" opacity="0.4" />
+  </g>
+
+  <!-- Large Prominent Medical Cross Map-Pin Icon (Right Side) -->
+  <g filter="url(#shadowPin)">
+    <!-- Map Pin Outer Shape -->
+    <path d="M 360 140 C 310 140, 270 180, 270 230 C 270 295, 360 365, 360 365 C 360 365, 450 295, 450 230 C 450 180, 410 140, 360 140 Z" fill="#f8fafc" />
+    <!-- Map Pin Inner Red Circle -->
+    <circle cx="360" cy="225" r="68" fill="url(#redPin)" />
+    <!-- White Medical Cross Inside Circle -->
+    <g fill="#ffffff">
+      <!-- Horizontal Bar -->
+      <rect x="312" y="209" width="96" height="32" rx="8" />
+      <!-- Vertical Bar -->
+      <rect x="344" y="177" width="32" height="96" rx="8" />
+    </g>
+    <!-- Highlight Reflection on Pin -->
+    <path d="M 315 165 C 330 152, 365 150, 390 165 C 380 156, 350 156, 325 170 Z" fill="#ffffff" opacity="0.6" />
+  </g>
+</svg>

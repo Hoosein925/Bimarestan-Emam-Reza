@@ -1,0 +1,8 @@
+{
+  "name": "My Hospital 2",
+  "description": "برنامه جامع پیگیری و فالوآپ بیماران و آموزش خود‌ مراقبتی بر اساس آخرین دستورالعمل",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
