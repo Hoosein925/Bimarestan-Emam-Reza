@@ -873,21 +873,32 @@ export default function App() {
             setCustomChecklists(fetchRes.data.checklists);
             safeLocalStorageSet('hospital_custom_checklists', JSON.stringify(fetchRes.data.checklists));
           }
+          if (fetchRes.data.newsBanners && fetchRes.data.newsBanners.length > 0) {
+            setNewsBanners(fetchRes.data.newsBanners);
+            safeLocalStorageSet('hospital_news_banners', JSON.stringify(fetchRes.data.newsBanners));
+          }
+          if (fetchRes.data.diseases && fetchRes.data.diseases.length > 0) {
+            setDiseases(fetchRes.data.diseases);
+            safeLocalStorageSet('hospital_diseases', JSON.stringify(fetchRes.data.diseases));
+          }
+          if (fetchRes.data.departments && fetchRes.data.departments.length > 0) {
+            setDepartments(fetchRes.data.departments);
+            safeLocalStorageSet('hospital_departments', JSON.stringify(fetchRes.data.departments));
+          }
+          if (fetchRes.data.admins && fetchRes.data.admins.length > 0) {
+            setAdmins(fetchRes.data.admins);
+            safeLocalStorageSet('hospital_admins', JSON.stringify(fetchRes.data.admins));
+          }
+          if (fetchRes.data.admissionRecords && fetchRes.data.admissionRecords.length > 0) {
+            setAdmissionHistory(fetchRes.data.admissionRecords);
+            safeLocalStorageSet('hospital_admission_history', JSON.stringify(fetchRes.data.admissionRecords));
+          }
         }
       }
       isInitialSupabaseLoaded.current = true;
     }
     initSupabase();
   }, []);
-
-  // Automatic background synchronization to Supabase whenever data changes
-  useEffect(() => {
-    if (!isInitialSupabaseLoaded.current) return;
-    const timer = setTimeout(() => {
-      syncHospitalDataToSupabase(patients, messages, complaints, customChecklists).catch(() => {});
-    }, 2500);
-    return () => clearTimeout(timer);
-  }, [patients, messages, complaints, customChecklists]);
 
   const [showSurveySuccessNotification, setShowSurveySuccessNotification] = useState(false);
   const [adminUsername, setAdminUsername] = useState('');
@@ -965,6 +976,15 @@ export default function App() {
     setNewsBanners(updated);
     safeLocalStorageSet('hospital_news_banners', JSON.stringify(updated));
   };
+
+  // Automatic background synchronization to Supabase whenever data changes
+  useEffect(() => {
+    if (!isInitialSupabaseLoaded.current) return;
+    const timer = setTimeout(() => {
+      syncHospitalDataToSupabase(patients, messages, complaints, customChecklists, newsBanners, diseases, departments, admins, admissionHistory).catch(() => {});
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [patients, messages, complaints, customChecklists, newsBanners, diseases, departments, admins, admissionHistory]);
 
   const [currentBannerIdx, setCurrentBannerIdx] = useState<number>(0);
   const [bannerFormTitle, setBannerFormTitle] = useState('');
@@ -10847,7 +10867,7 @@ export default function App() {
               <button
                 onClick={async () => {
                   setSupabaseActionMsg('در حال ارسال اطلاعات به سرور ابری Supabase...');
-                  const res = await syncHospitalDataToSupabase(patients, messages, complaints, customChecklists);
+                  const res = await syncHospitalDataToSupabase(patients, messages, complaints, customChecklists, newsBanners, diseases, departments, admins, admissionHistory);
                   setSupabaseActionMsg(res.message);
                 }}
                 className="flex items-center justify-center gap-2 bg-gradient-to-b from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white font-bold py-3.5 px-4 rounded-xl shadow-lg shadow-indigo-500/20 text-xs transition-all cursor-pointer"
@@ -10876,6 +10896,26 @@ export default function App() {
                     if (res.data.checklists) {
                       setCustomChecklists(res.data.checklists);
                       safeLocalStorageSet('hospital_custom_checklists', JSON.stringify(res.data.checklists));
+                    }
+                    if (res.data.newsBanners) {
+                      setNewsBanners(res.data.newsBanners);
+                      safeLocalStorageSet('hospital_news_banners', JSON.stringify(res.data.newsBanners));
+                    }
+                    if (res.data.diseases) {
+                      setDiseases(res.data.diseases);
+                      safeLocalStorageSet('hospital_diseases', JSON.stringify(res.data.diseases));
+                    }
+                    if (res.data.departments) {
+                      setDepartments(res.data.departments);
+                      safeLocalStorageSet('hospital_departments', JSON.stringify(res.data.departments));
+                    }
+                    if (res.data.admins) {
+                      setAdmins(res.data.admins);
+                      safeLocalStorageSet('hospital_admins', JSON.stringify(res.data.admins));
+                    }
+                    if (res.data.admissionRecords) {
+                      setAdmissionHistory(res.data.admissionRecords);
+                      safeLocalStorageSet('hospital_admission_history', JSON.stringify(res.data.admissionRecords));
                     }
                   }
                   setSupabaseActionMsg(res.message);
