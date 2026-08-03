@@ -41,45 +41,84 @@ async function generateIcons() {
   for (const item of sizes) {
     const targetDir = item.dest === 'root' ? publicDir : iconsDir;
     const outputPath = path.join(targetDir, item.name);
-    await sharp(svgBuffer)
-      .resize(item.size, item.size, {
+
+    const isAppleTouch = item.name.includes('apple-touch-icon');
+    const isFavicon = item.name.includes('favicon');
+
+    // For apple touch icons, use solid background (#f0f9ff) and 70% inner emblem
+    // For favicons, use 90% inner emblem
+    // For standard PWA icons, use 75% inner emblem with transparent padding so they never clip on mobile home screens
+    const scaleRatio = isAppleTouch ? 0.70 : (isFavicon ? 0.90 : 0.75);
+    const innerSize = Math.max(12, Math.round(item.size * scaleRatio));
+    const padding = Math.floor((item.size - innerSize) / 2);
+
+    const innerIconBuffer = await sharp(svgBuffer)
+      .resize(innerSize, innerSize, {
         fit: 'contain',
         background: { r: 0, g: 0, b: 0, alpha: 0 }
       })
+      .png()
+      .toBuffer();
+
+    const bgAlpha = isAppleTouch ? 1 : 0;
+    const bgRed = isAppleTouch ? 240 : 0;
+    const bgGreen = isAppleTouch ? 249 : 0;
+    const bgBlue = isAppleTouch ? 255 : 0;
+
+    await sharp({
+      create: {
+        width: item.size,
+        height: item.size,
+        channels: 4,
+        background: { r: bgRed, g: bgGreen, b: bgBlue, alpha: bgAlpha }
+      }
+    })
+      .composite([
+        {
+          input: innerIconBuffer,
+          top: padding,
+          left: padding
+        }
+      ])
       .png({ quality: 100 })
       .toFile(outputPath);
-    console.log(`Generated: ${item.dest}/${item.name} (${item.size}x${item.size})`);
+
+    console.log(`Generated: ${item.dest}/${item.name} (${item.size}x${item.size} - scale ${scaleRatio * 100}%)`);
   }
 
-  // Generate 512x512 Maskable Icon for Android Adaptive Icons (with safe zone margin)
-  const maskablePath = path.join(iconsDir, 'maskable-icon-512x512.png');
-  const innerSize = 410; // 80% safe area for Android adaptive icons
-  const padding = Math.floor((512 - innerSize) / 2);
-  
-  const innerIconBuffer = await sharp(svgBuffer)
-    .resize(innerSize, innerSize)
-    .png()
-    .toBuffer();
+  // Generate Maskable Icons for Android Adaptive Icons (strictly inside 60% safe zone circle)
+  const maskableSizes = [192, 512];
+  for (const mSize of maskableSizes) {
+    const maskablePath = path.join(iconsDir, `maskable-icon-${mSize}x${mSize}.png`);
+    // 60% safe area for Android adaptive icons (guaranteed inside 66% circle safe zone)
+    const innerSize = Math.round(mSize * 0.60);
+    const padding = Math.floor((mSize - innerSize) / 2);
 
-  await sharp({
-    create: {
-      width: 512,
-      height: 512,
-      channels: 4,
-      background: { r: 240, g: 249, b: 255, alpha: 1 } // #f0f9ff light blue theme background
-    }
-  })
-    .composite([
-      {
-        input: innerIconBuffer,
-        top: padding,
-        left: padding
+    const innerIconBuffer = await sharp(svgBuffer)
+      .resize(innerSize, innerSize)
+      .png()
+      .toBuffer();
+
+    await sharp({
+      create: {
+        width: mSize,
+        height: mSize,
+        channels: 4,
+        background: { r: 240, g: 249, b: 255, alpha: 1 } // #f0f9ff light blue theme background
       }
-    ])
-    .png({ quality: 100 })
-    .toFile(maskablePath);
+    })
+      .composite([
+        {
+          input: innerIconBuffer,
+          top: padding,
+          left: padding
+        }
+      ])
+      .png({ quality: 100 })
+      .toFile(maskablePath);
 
-  console.log('Generated: icons/maskable-icon-512x512.png (512x512 - Adaptive Android Safe Zone)');
+    console.log(`Generated: icons/maskable-icon-${mSize}x${mSize}.png (${mSize}x${mSize} - Android Safe Zone 60%)`);
+  }
 
   // Also copy 32x32 to favicon.ico in root
   const favicon32Path = path.join(publicDir, 'favicon-32x32.png');
