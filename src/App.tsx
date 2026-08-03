@@ -65,8 +65,17 @@ import {
   Archive,
   History,
   RotateCcw,
-  X
+  X,
+  Database,
+  Cloud
 } from 'lucide-react';
+import {
+  supabase,
+  testSupabaseConnection,
+  syncHospitalDataToSupabase,
+  fetchHospitalDataFromSupabase,
+  getSupabaseSetupSQL
+} from './utils/supabase';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   ResponsiveContainer,
@@ -827,6 +836,26 @@ export default function App() {
   const [showAdminLoginModal, setShowAdminLoginModal] = useState(false);
   const [showAboutModal, setShowAboutModal] = useState(false);
   const [showSurveyModal, setShowSurveyModal] = useState(false);
+  const [showSupabaseModal, setShowSupabaseModal] = useState(false);
+  const [supabaseStatus, setSupabaseStatus] = useState<{ connected: boolean; message: string; loading: boolean }>({
+    connected: true,
+    message: 'اتصال به پایگاه داده ابری Supabase برقرار است',
+    loading: false
+  });
+  const [supabaseActionMsg, setSupabaseActionMsg] = useState<string>('');
+
+  useEffect(() => {
+    async function checkSupabase() {
+      const res = await testSupabaseConnection();
+      setSupabaseStatus({
+        connected: res.success,
+        message: res.message,
+        loading: false
+      });
+    }
+    checkSupabase();
+  }, []);
+
   const [showSurveySuccessNotification, setShowSurveySuccessNotification] = useState(false);
   const [adminUsername, setAdminUsername] = useState('');
   const [adminPassword, setAdminPassword] = useState('');
@@ -10698,6 +10727,157 @@ export default function App() {
               className="w-full bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold py-3 rounded-xl transition-colors cursor-pointer"
             >
               بستن پنجره راهنما
+            </button>
+          </motion.div>
+        </div>
+      )}
+
+      {/* SUPABASE CLOUD DATABASE MANAGEMENT MODAL */}
+      {showSupabaseModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex justify-center items-center px-4 overflow-y-auto py-10">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="bg-white border border-slate-200 rounded-3xl p-8 max-w-2xl w-full shadow-2xl relative my-auto space-y-6"
+          >
+            <button
+              onClick={() => setShowSupabaseModal(false)}
+              className="absolute top-4 left-4 text-slate-400 hover:text-slate-700 cursor-pointer text-lg font-bold"
+            >
+              ✕
+            </button>
+
+            <div className="text-center">
+              <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl w-fit mx-auto mb-3">
+                <Database className="w-8 h-8" />
+              </div>
+              <h3 className="text-xl font-black text-slate-900">مدیریت پایگاه داده ابری Supabase</h3>
+              <p className="text-xs text-slate-500 mt-1">
+                اتصال مستقیم به پروژه ابری جهت پشتیبان‌گیری، همگام‌سازی و دسترسی همزمان از تمامی دستگاه‌ها
+              </p>
+            </div>
+
+            {/* Connection Status Badge */}
+            <div className={`p-4 rounded-2xl border flex items-center justify-between gap-3 ${
+              supabaseStatus.connected
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                : 'bg-amber-50 border-amber-200 text-amber-800'
+            }`}>
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">{supabaseStatus.connected ? '🟢' : '🟡'}</span>
+                <div>
+                  <h4 className="text-xs font-black">وضعیت اتصال پایگاه داده:</h4>
+                  <p className="text-[11px] mt-0.5 opacity-90 font-mono">{supabaseStatus.message}</p>
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  setSupabaseStatus(prev => ({ ...prev, loading: true }));
+                  const res = await testSupabaseConnection();
+                  setSupabaseStatus({
+                    connected: res.success,
+                    message: res.message,
+                    loading: false
+                  });
+                  setSupabaseActionMsg('تست اتصال انجام شد.');
+                }}
+                disabled={supabaseStatus.loading}
+                className="bg-white/80 hover:bg-white text-slate-800 px-3 py-1.5 rounded-xl border border-slate-200 text-[11px] font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50"
+              >
+                {supabaseStatus.loading ? 'در حال بررسی...' : 'بررسی مجدد اتصال'}
+              </button>
+            </div>
+
+            {/* Config details */}
+            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-slate-600">آدرس سرور ابری (Supabase URL):</span>
+                <span className="font-mono font-bold text-indigo-600 dir-ltr text-right">
+                  https://fsuycchgujsdvdxjvumg.supabase.co
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-slate-600">تعداد پرونده‌های بیماران:</span>
+                <span className="font-mono font-bold text-slate-800">{patients.length} بیمار</span>
+              </div>
+            </div>
+
+            {/* Action Feedback Message */}
+            {supabaseActionMsg && (
+              <div className="p-3 bg-indigo-50 border border-indigo-200 text-indigo-900 rounded-xl text-xs font-bold text-center">
+                {supabaseActionMsg}
+              </div>
+            )}
+
+            {/* Sync / Restore Action Buttons */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                onClick={async () => {
+                  setSupabaseActionMsg('در حال ارسال اطلاعات به سرور ابری Supabase...');
+                  const res = await syncHospitalDataToSupabase(patients, messages, complaints, customChecklists);
+                  setSupabaseActionMsg(res.message);
+                }}
+                className="flex items-center justify-center gap-2 bg-gradient-to-b from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white font-bold py-3.5 px-4 rounded-xl shadow-lg shadow-indigo-500/20 text-xs transition-all cursor-pointer"
+              >
+                <Cloud className="w-4 h-4" />
+                <span>پشتیبان‌گیری و ذخیره در ابری Supabase</span>
+              </button>
+
+              <button
+                onClick={async () => {
+                  setSupabaseActionMsg('در حال بارگذاری اطلاعات از سرور ابری...');
+                  const res = await fetchHospitalDataFromSupabase();
+                  if (res.success && res.data) {
+                    if (res.data.patients) {
+                      setPatients(res.data.patients);
+                      safeLocalStorageSet('hospital_patients', JSON.stringify(res.data.patients));
+                    }
+                    if (res.data.messages) {
+                      setMessages(res.data.messages);
+                      safeLocalStorageSet('hospital_messages', JSON.stringify(res.data.messages));
+                    }
+                    if (res.data.complaints) {
+                      setComplaints(res.data.complaints);
+                      safeLocalStorageSet('hospital_complaints', JSON.stringify(res.data.complaints));
+                    }
+                    if (res.data.checklists) {
+                      setCustomChecklists(res.data.checklists);
+                      safeLocalStorageSet('hospital_custom_checklists', JSON.stringify(res.data.checklists));
+                    }
+                  }
+                  setSupabaseActionMsg(res.message);
+                }}
+                className="flex items-center justify-center gap-2 bg-gradient-to-b from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800 text-white font-bold py-3.5 px-4 rounded-xl shadow-lg shadow-emerald-500/20 text-xs transition-all cursor-pointer"
+              >
+                <Database className="w-4 h-4" />
+                <span>بازیابی اطلاعات از Supabase</span>
+              </button>
+            </div>
+
+            {/* SQL Setup instructions */}
+            <div className="space-y-2 pt-2 border-t border-slate-200">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-slate-700">اسکریپت SQL جهت ایجاد جدول در Supabase (در صورت نیاز):</span>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(getSupabaseSetupSQL());
+                    setSupabaseActionMsg('کد SQL با موفقیت در کلیپ‌بورد کپی شد.');
+                  }}
+                  className="text-[11px] text-indigo-600 hover:text-indigo-800 font-bold underline cursor-pointer"
+                >
+                  کپی کردن کد SQL
+                </button>
+              </div>
+              <pre className="bg-slate-900 text-sky-300 p-3 rounded-xl text-[10px] font-mono overflow-x-auto max-h-32 text-left dir-ltr">
+                {getSupabaseSetupSQL()}
+              </pre>
+            </div>
+
+            <button
+              onClick={() => setShowSupabaseModal(false)}
+              className="w-full bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold py-3 rounded-xl transition-colors cursor-pointer"
+            >
+              بستن پنجره مدیریت Supabase
             </button>
           </motion.div>
         </div>
