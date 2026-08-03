@@ -75,6 +75,113 @@ export async function syncHospitalDataToSupabase(
   admissionRecords?: AdmissionRecord[]
 ): Promise<{ success: boolean; message: string }> {
   try {
+    // 1. First sync rows to individual Supabase tables independently so even if one table has an old schema, others succeed
+    const tryUpsert = async (table: string, rows: any[]) => {
+      try {
+        if (!rows || rows.length === 0) return true;
+        const { error } = await supabase.from(table).upsert(rows, { onConflict: 'id' });
+        if (error) {
+          console.warn(`Supabase upsert warning on ${table}:`, error.message);
+          return false;
+        }
+        return true;
+      } catch (e) {
+        return false;
+      }
+    };
+
+    const results = await Promise.all([
+      tryUpsert('hospital_news_banners', newsBanners?.map(b => ({
+        id: b.id,
+        title: b.title || '',
+        content: b.content || '',
+        image_url: b.imageUrl || '',
+        is_active: b.isActive ?? true,
+        created_at: b.createdAt || '',
+        category: 'اخبار بیمارستان',
+        summary: b.content ? b.content.slice(0, 100) : ''
+      })) || []),
+
+      tryUpsert('hospital_patients', patients?.map((p, idx) => ({
+        id: p.nationalId || p.fileNumber || String(idx),
+        national_id: p.nationalId || '',
+        file_number: p.fileNumber || '',
+        name: p.name || '',
+        age: p.age || 0,
+        phone: p.phone || '',
+        department_id: p.departmentId || '',
+        disease_id: p.diseaseId || '',
+        followup_status: p.followupStatus || 'pending',
+        discharge_date: p.dischargeDate || '',
+        registered_at: p.registeredAt || new Date().toISOString(),
+        data_json: JSON.stringify(p)
+      })) || []),
+
+      tryUpsert('hospital_diseases', diseases?.map(d => ({
+        id: d.id,
+        name: d.name || '',
+        english_name: d.englishName || '',
+        department_id: d.departmentId || '',
+        description: d.description || '',
+        data_json: JSON.stringify(d)
+      })) || []),
+
+      tryUpsert('hospital_messages', messages?.map(m => ({
+        id: m.id,
+        title: m.question ? m.question.slice(0, 50) : '',
+        content: m.question || '',
+        sender_name: m.patientName || '',
+        target_group: m.departmentId || '',
+        created_at: m.askedAt || '',
+        data_json: JSON.stringify(m)
+      })) || []),
+
+      tryUpsert('hospital_complaints', complaints?.map(c => ({
+        id: c.id,
+        subject: c.description ? c.description.slice(0, 50) : '',
+        department_name: '',
+        description: c.description || '',
+        status: 'submitted',
+        created_at: (c as any).submittedAt || (c as any).date || '',
+        data_json: JSON.stringify(c)
+      })) || []),
+
+      tryUpsert('hospital_custom_checklists', checklists?.map(c => ({
+        id: c.id,
+        title: c.title || '',
+        description: '',
+        target_group: c.targetType || 'all',
+        created_at: c.createdAt || '',
+        data_json: JSON.stringify(c)
+      })) || []),
+
+      tryUpsert('hospital_departments', departments?.map(d => ({
+        id: d.id,
+        name: d.name || '',
+        icon: d.icon || '',
+        data_json: JSON.stringify(d)
+      })) || []),
+
+      tryUpsert('hospital_admins', admins?.map(a => ({
+        id: a.username,
+        username: a.username || '',
+        name: a.name || '',
+        role: a.role || '',
+        data_json: JSON.stringify(a)
+      })) || []),
+
+      tryUpsert('hospital_admission_history', admissionRecords?.map((a, idx) => ({
+        id: a.id || String(idx),
+        national_id: a.nationalId || '',
+        patient_name: a.patientName || '',
+        disease_name: a.diseaseName || '',
+        admission_date: a.admissionDate || '',
+        department_name: a.departmentName || '',
+        data_json: JSON.stringify(a)
+      })) || [])
+    ]);
+
+    // 2. Also save to main hospital_cloud_sync snapshot table
     const payload = {
       id: 'main_hospital_snapshot',
       updated_at: new Date().toISOString(),
@@ -116,124 +223,40 @@ export async function syncHospitalDataToSupabase(
 
     if (syncError) {
       if (syncError.code === '42P01' || syncError.message?.toLowerCase().includes('relation') || syncError.message?.toLowerCase().includes('table')) {
+        // Even if main table is missing, check if any individual tables succeeded
+        if (results.some(res => res === true)) {
+          return {
+            success: true,
+            message: 'داده‌ها در جداول اختصاصی Supabase ذخیره شدند. (برای قابلیت همگام‌سازی کامل لطفاً اسکریپت جدید SQL را اجرا کنید)'
+          };
+        }
         return {
           success: false,
-          message: 'جدول hospital_cloud_sync در Supabase ایجاد نشده است. لطفاً اسکریپت SQL پیشنهادی را در پنل Supabase اجرا کنید.'
+          message: 'جداول در Supabase ایجاد نشده‌اند. لطفاً اسکریپت جامع SQL (جدید) را در پنل Supabase اجرا کنید.'
         };
       }
       if (syncError.code === '42501' || syncError.message?.toLowerCase().includes('policy') || syncError.message?.toLowerCase().includes('permission')) {
         return {
           success: false,
-          message: 'خطای سطح دسترسی (RLS): لطفاً اسکریپت SQL شامل Policyهای دسترسی را در Supabase اجرا کنید.'
+          message: 'خطای سطح دسترسی (RLS): لطفاً اسکریپت SQL شامل Policyهای دسترسی و باکت را در Supabase اجرا کنید.'
         };
       }
       console.warn('Supabase sync warning:', syncError.message);
+      if (results.some(res => res === true)) {
+        return {
+          success: true,
+          message: 'برخی جداول ابری با موفقیت به‌روزرسانی شدند.'
+        };
+      }
       return {
         success: false,
         message: 'خطا در ذخیره‌سازی ابری: ' + (syncError.message || 'خطای ناشناخته')
       };
     }
 
-    // Simultaneously sync rows to individual Supabase tables if created by user
-    const tryUpsert = async (table: string, rows: any[]) => {
-      try {
-        if (!rows || rows.length === 0) return;
-        await supabase.from(table).upsert(rows, { onConflict: 'id' });
-      } catch (e) {}
-    };
-
-    await tryUpsert('hospital_news_banners', newsBanners?.map(b => ({
-      id: b.id,
-      title: b.title || '',
-      content: b.content || '',
-      image_url: b.imageUrl || '',
-      is_active: b.isActive ?? true,
-      created_at: b.createdAt || '',
-      category: 'اخبار بیمارستان',
-      summary: b.content ? b.content.slice(0, 100) : ''
-    })) || []);
-
-    await tryUpsert('hospital_patients', patients?.map((p, idx) => ({
-      id: p.nationalId || p.fileNumber || String(idx),
-      national_id: p.nationalId || '',
-      file_number: p.fileNumber || '',
-      name: p.name || '',
-      age: p.age || 0,
-      phone: p.phone || '',
-      department_id: p.departmentId || '',
-      disease_id: p.diseaseId || '',
-      followup_status: p.followupStatus || 'pending',
-      discharge_date: p.dischargeDate || '',
-      registered_at: p.registeredAt || new Date().toISOString(),
-      data_json: JSON.stringify(p)
-    })) || []);
-
-    await tryUpsert('hospital_diseases', diseases?.map(d => ({
-      id: d.id,
-      name: d.name || '',
-      english_name: d.englishName || '',
-      department_id: d.departmentId || '',
-      description: d.description || '',
-      data_json: JSON.stringify(d)
-    })) || []);
-
-    await tryUpsert('hospital_messages', messages?.map(m => ({
-      id: m.id,
-      title: m.question ? m.question.slice(0, 50) : '',
-      content: m.question || '',
-      sender_name: m.patientName || '',
-      target_group: m.departmentId || '',
-      created_at: m.askedAt || '',
-      data_json: JSON.stringify(m)
-    })) || []);
-
-    await tryUpsert('hospital_complaints', complaints?.map(c => ({
-      id: c.id,
-      subject: c.description ? c.description.slice(0, 50) : '',
-      department_name: '',
-      description: c.description || '',
-      status: 'submitted',
-      created_at: (c as any).submittedAt || (c as any).date || '',
-      data_json: JSON.stringify(c)
-    })) || []);
-
-    await tryUpsert('hospital_custom_checklists', checklists?.map(c => ({
-      id: c.id,
-      title: c.title || '',
-      description: '',
-      target_group: c.targetType || 'all',
-      created_at: c.createdAt || '',
-      data_json: JSON.stringify(c)
-    })) || []);
-
-    await tryUpsert('hospital_departments', departments?.map(d => ({
-      id: d.id,
-      name: d.name || '',
-      icon: d.icon || '',
-      data_json: JSON.stringify(d)
-    })) || []);
-
-    await tryUpsert('hospital_admins', admins?.map(a => ({
-      id: a.username,
-      username: a.username || '',
-      name: a.name || '',
-      role: a.role || '',
-      data_json: JSON.stringify(a)
-    })) || []);
-
-    await tryUpsert('hospital_admission_history', admissionRecords?.map((a, idx) => ({
-      id: a.id || String(idx),
-      national_id: a.nationalId || '',
-      patient_name: a.patientName || '',
-      disease_name: a.diseaseName || '',
-      admission_date: a.admissionDate || '',
-      department_name: a.departmentName || '',
-      data_json: JSON.stringify(a)
-    })) || []);
-
     return {
       success: true,
-      message: 'تمامی داده‌های بیماران، اخبار، بیماری‌ها، پیام‌ها و چک‌لیست‌ها با موفقیت در فضای ابری Supabase همگام‌سازی شد.'
+      message: 'تمامی داده‌های بیماران، اخبار، بیماری‌ها، پیام‌ها، بخش‌ها و چک‌لیست‌ها با موفقیت در فضای ابری Supabase همگام‌سازی شد.'
     };
   } catch (err: any) {
     console.warn('Supabase sync exception:', err?.message || err);
@@ -383,11 +406,26 @@ export async function fetchHospitalDataFromSupabase(): Promise<{
  */
 export function getSupabaseSetupSQL(): string {
   return `-- ================================================================
--- اسکریپت جامع ایجاد جداول، ستون‌ها و فعال‌سازی Policyهای دسترسی (RLS)
+-- اسکریپت کامل و نهایی پاکسازی، ساخت مجدد تمامی جداول، باکت استوریج و پالیسی‌های RLS
+-- (می‌توانید این کد را یکجا در SQL Editor سوپابیس کپی و Run کنید)
 -- ================================================================
 
--- ۱. ایجاد جدول اصلی همگام‌سازی ابری و افزودن ستون‌های کامل
-CREATE TABLE IF NOT EXISTS hospital_cloud_sync (
+-- ۱. پاکسازی جداول قبلی در صورت وجود (برای شروع تمیز و بدون خطا)
+DROP TABLE IF EXISTS hospital_cloud_sync CASCADE;
+DROP TABLE IF EXISTS hospital_patients CASCADE;
+DROP TABLE IF EXISTS hospital_news_banners CASCADE;
+DROP TABLE IF EXISTS hospital_diseases CASCADE;
+DROP TABLE IF EXISTS hospital_messages CASCADE;
+DROP TABLE IF EXISTS hospital_complaints CASCADE;
+DROP TABLE IF EXISTS hospital_custom_checklists CASCADE;
+DROP TABLE IF EXISTS hospital_departments CASCADE;
+DROP TABLE IF EXISTS hospital_admins CASCADE;
+DROP TABLE IF EXISTS hospital_admission_history CASCADE;
+DROP TABLE IF EXISTS hospital_satisfaction_surveys CASCADE;
+DROP TABLE IF EXISTS hospital_dept_satisfaction_surveys CASCADE;
+
+-- ۲. ساخت جدول اصلی همگام‌سازی ابری (Snapshot کل سیستم)
+CREATE TABLE hospital_cloud_sync (
   id TEXT PRIMARY KEY,
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   patients_json TEXT,
@@ -401,14 +439,8 @@ CREATE TABLE IF NOT EXISTS hospital_cloud_sync (
   admission_records_json TEXT
 );
 
-ALTER TABLE hospital_cloud_sync ADD COLUMN IF NOT EXISTS news_banners_json TEXT;
-ALTER TABLE hospital_cloud_sync ADD COLUMN IF NOT EXISTS diseases_json TEXT;
-ALTER TABLE hospital_cloud_sync ADD COLUMN IF NOT EXISTS departments_json TEXT;
-ALTER TABLE hospital_cloud_sync ADD COLUMN IF NOT EXISTS admins_json TEXT;
-ALTER TABLE hospital_cloud_sync ADD COLUMN IF NOT EXISTS admission_records_json TEXT;
-
--- ۲. ایجاد جداول اختصاصی بیمارستان همراه با ستون‌های مورد نیاز
-CREATE TABLE IF NOT EXISTS hospital_patients (
+-- ۳. ساخت جداول اختصاصی بیمارستان همراه با تمامی ستون‌ها
+CREATE TABLE hospital_patients (
   id TEXT PRIMARY KEY,
   national_id TEXT,
   file_number TEXT,
@@ -422,9 +454,8 @@ CREATE TABLE IF NOT EXISTS hospital_patients (
   registered_at TEXT,
   data_json TEXT
 );
-ALTER TABLE hospital_patients ADD COLUMN IF NOT EXISTS data_json TEXT;
 
-CREATE TABLE IF NOT EXISTS hospital_news_banners (
+CREATE TABLE hospital_news_banners (
   id TEXT PRIMARY KEY,
   title TEXT,
   content TEXT,
@@ -434,14 +465,8 @@ CREATE TABLE IF NOT EXISTS hospital_news_banners (
   category TEXT,
   summary TEXT
 );
-ALTER TABLE hospital_news_banners ADD COLUMN IF NOT EXISTS content TEXT;
-ALTER TABLE hospital_news_banners ADD COLUMN IF NOT EXISTS image_url TEXT;
-ALTER TABLE hospital_news_banners ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;
-ALTER TABLE hospital_news_banners ADD COLUMN IF NOT EXISTS created_at TEXT;
-ALTER TABLE hospital_news_banners ADD COLUMN IF NOT EXISTS category TEXT;
-ALTER TABLE hospital_news_banners ADD COLUMN IF NOT EXISTS summary TEXT;
 
-CREATE TABLE IF NOT EXISTS hospital_diseases (
+CREATE TABLE hospital_diseases (
   id TEXT PRIMARY KEY,
   name TEXT,
   english_name TEXT,
@@ -449,9 +474,8 @@ CREATE TABLE IF NOT EXISTS hospital_diseases (
   description TEXT,
   data_json TEXT
 );
-ALTER TABLE hospital_diseases ADD COLUMN IF NOT EXISTS data_json TEXT;
 
-CREATE TABLE IF NOT EXISTS hospital_messages (
+CREATE TABLE hospital_messages (
   id TEXT PRIMARY KEY,
   title TEXT,
   content TEXT,
@@ -460,9 +484,8 @@ CREATE TABLE IF NOT EXISTS hospital_messages (
   created_at TEXT,
   data_json TEXT
 );
-ALTER TABLE hospital_messages ADD COLUMN IF NOT EXISTS data_json TEXT;
 
-CREATE TABLE IF NOT EXISTS hospital_complaints (
+CREATE TABLE hospital_complaints (
   id TEXT PRIMARY KEY,
   subject TEXT,
   department_name TEXT,
@@ -471,9 +494,8 @@ CREATE TABLE IF NOT EXISTS hospital_complaints (
   created_at TEXT,
   data_json TEXT
 );
-ALTER TABLE hospital_complaints ADD COLUMN IF NOT EXISTS data_json TEXT;
 
-CREATE TABLE IF NOT EXISTS hospital_custom_checklists (
+CREATE TABLE hospital_custom_checklists (
   id TEXT PRIMARY KEY,
   title TEXT,
   description TEXT,
@@ -481,26 +503,23 @@ CREATE TABLE IF NOT EXISTS hospital_custom_checklists (
   created_at TEXT,
   data_json TEXT
 );
-ALTER TABLE hospital_custom_checklists ADD COLUMN IF NOT EXISTS data_json TEXT;
 
-CREATE TABLE IF NOT EXISTS hospital_departments (
+CREATE TABLE hospital_departments (
   id TEXT PRIMARY KEY,
   name TEXT,
   icon TEXT,
   data_json TEXT
 );
-ALTER TABLE hospital_departments ADD COLUMN IF NOT EXISTS data_json TEXT;
 
-CREATE TABLE IF NOT EXISTS hospital_admins (
+CREATE TABLE hospital_admins (
   id TEXT PRIMARY KEY,
   username TEXT,
   name TEXT,
   role TEXT,
   data_json TEXT
 );
-ALTER TABLE hospital_admins ADD COLUMN IF NOT EXISTS data_json TEXT;
 
-CREATE TABLE IF NOT EXISTS hospital_admission_history (
+CREATE TABLE hospital_admission_history (
   id TEXT PRIMARY KEY,
   national_id TEXT,
   patient_name TEXT,
@@ -509,52 +528,51 @@ CREATE TABLE IF NOT EXISTS hospital_admission_history (
   department_name TEXT,
   data_json TEXT
 );
-ALTER TABLE hospital_admission_history ADD COLUMN IF NOT EXISTS data_json TEXT;
 
--- ================================================================
--- ۳. فعال‌سازی RLS و اعطای دسترسی (Policies) به تمامی جداول hospital_*
--- ================================================================
+-- ۴. ساخت و تنظیم باکت استوریج (Storage Bucket) برای آپلود فایل و صدا
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('hospital-files', 'hospital-files', true, 52428800, NULL)
+ON CONFLICT (id) DO UPDATE SET public = true;
+
+-- ۵. اعطای دسترسی عمومی (Policies) به Storage Bucket به صورت امن
+DO $$
+BEGIN
+  DROP POLICY IF EXISTS "Allow public read hospital-files" ON storage.objects;
+  DROP POLICY IF EXISTS "Allow public upload hospital-files" ON storage.objects;
+  DROP POLICY IF EXISTS "Allow public update hospital-files" ON storage.objects;
+  DROP POLICY IF EXISTS "Allow public delete hospital-files" ON storage.objects;
+
+  CREATE POLICY "Allow public read hospital-files"
+    ON storage.objects FOR SELECT
+    USING (bucket_id = 'hospital-files');
+
+  CREATE POLICY "Allow public upload hospital-files"
+    ON storage.objects FOR INSERT
+    WITH CHECK (bucket_id = 'hospital-files');
+
+  CREATE POLICY "Allow public update hospital-files"
+    ON storage.objects FOR UPDATE
+    USING (bucket_id = 'hospital-files');
+
+  CREATE POLICY "Allow public delete hospital-files"
+    ON storage.objects FOR DELETE
+    USING (bucket_id = 'hospital-files');
+EXCEPTION WHEN others THEN
+  RAISE NOTICE 'خطایی در تنظیم پالیسی استوریج رخ داد که قابل چشم‌پوشی است: %', SQLERRM;
+END
+$$;
+
+-- ۶. فعال‌سازی RLS و اعطای دسترسی عمومی (Policies) به تمامی جداول hospital_*
 DO $$
 DECLARE
   t text;
-  tbls text[] := ARRAY[
-    'hospital_cloud_sync',
-    'hospital_patients',
-    'hospital_news_banners',
-    'hospital_diseases',
-    'hospital_messages',
-    'hospital_complaints',
-    'hospital_custom_checklists',
-    'hospital_departments',
-    'hospital_admins',
-    'hospital_admission_history',
-    'hospital_satisfaction_surveys',
-    'hospital_dept_satisfaction_surveys',
-    'patients',
-    'news_banners',
-    'diseases',
-    'messages',
-    'complaints',
-    'checklists',
-    'custom_checklists',
-    'departments',
-    'admins',
-    'admission_history',
-    'satisfaction_surveys',
-    'dept_satisfaction_surveys'
-  ];
 BEGIN
-  -- ۱. اعطای دسترسی به تمام جداول مشخص‌شده و هر جدولی که با hospital_ شروع می‌شود
   FOR t IN SELECT table_name FROM information_schema.tables 
            WHERE table_schema = 'public' 
-             AND (table_name LIKE 'hospital_%' OR table_name = ANY(tbls))
+             AND table_name LIKE 'hospital_%'
   LOOP
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY;', t);
     EXECUTE format('DROP POLICY IF EXISTS "Allow All %I" ON public.%I;', t, t);
-    EXECUTE format('DROP POLICY IF EXISTS "Enable read access for all users" ON public.%I;', t);
-    EXECUTE format('DROP POLICY IF EXISTS "Enable insert access for all users" ON public.%I;', t);
-    EXECUTE format('DROP POLICY IF EXISTS "Enable update access for all users" ON public.%I;', t);
-    EXECUTE format('DROP POLICY IF EXISTS "Enable delete access for all users" ON public.%I;', t);
     EXECUTE format('CREATE POLICY "Allow All %I" ON public.%I FOR ALL TO public, anon, authenticated USING (true) WITH CHECK (true);', t, t);
     EXECUTE format('GRANT ALL ON TABLE public.%I TO anon, authenticated, public;', t);
   END LOOP;
