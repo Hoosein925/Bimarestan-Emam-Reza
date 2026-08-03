@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { RichTextEditor } from './components/RichTextEditor';
 import { NewsRichTextEditor } from './components/NewsRichTextEditor';
 import { FormattedText, stripHtmlTags } from './components/FormattedText';
@@ -843,18 +843,51 @@ export default function App() {
     loading: false
   });
   const [supabaseActionMsg, setSupabaseActionMsg] = useState<string>('');
+  const isInitialSupabaseLoaded = useRef(false);
 
   useEffect(() => {
-    async function checkSupabase() {
+    async function initSupabase() {
       const res = await testSupabaseConnection();
       setSupabaseStatus({
         connected: res.success,
         message: res.message,
         loading: false
       });
+      if (res.success) {
+        // Attempt to automatically load latest snapshot from Supabase Cloud on boot
+        const fetchRes = await fetchHospitalDataFromSupabase();
+        if (fetchRes.success && fetchRes.data) {
+          if (fetchRes.data.patients && fetchRes.data.patients.length > 0) {
+            setPatients(fetchRes.data.patients);
+            safeLocalStorageSet('hospital_patients', JSON.stringify(fetchRes.data.patients));
+          }
+          if (fetchRes.data.messages && fetchRes.data.messages.length > 0) {
+            setMessages(fetchRes.data.messages);
+            safeLocalStorageSet('hospital_messages', JSON.stringify(fetchRes.data.messages));
+          }
+          if (fetchRes.data.complaints && fetchRes.data.complaints.length > 0) {
+            setComplaints(fetchRes.data.complaints);
+            safeLocalStorageSet('hospital_complaints', JSON.stringify(fetchRes.data.complaints));
+          }
+          if (fetchRes.data.checklists && fetchRes.data.checklists.length > 0) {
+            setCustomChecklists(fetchRes.data.checklists);
+            safeLocalStorageSet('hospital_custom_checklists', JSON.stringify(fetchRes.data.checklists));
+          }
+        }
+      }
+      isInitialSupabaseLoaded.current = true;
     }
-    checkSupabase();
+    initSupabase();
   }, []);
+
+  // Automatic background synchronization to Supabase whenever data changes
+  useEffect(() => {
+    if (!isInitialSupabaseLoaded.current) return;
+    const timer = setTimeout(() => {
+      syncHospitalDataToSupabase(patients, messages, complaints, customChecklists).catch(() => {});
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [patients, messages, complaints, customChecklists]);
 
   const [showSurveySuccessNotification, setShowSurveySuccessNotification] = useState(false);
   const [adminUsername, setAdminUsername] = useState('');
