@@ -26,11 +26,17 @@ export async function testSupabaseConnection(): Promise<{ success: boolean; mess
     const latencyMs = Date.now() - startTime;
 
     if (error && error.code !== 'PGRST116' && !error.message?.includes('does not exist')) {
-      // If table doesn't exist, Supabase is still connected and reachable!
       if (error.code === '42P01' || error.message?.toLowerCase().includes('relation') || error.message?.toLowerCase().includes('table')) {
         return {
           success: true,
           message: 'اتصال به سرور ابری Supabase برقرار است (آماده ایجاد جدول hospital_cloud_sync)',
+          latencyMs
+        };
+      }
+      if (error.code === '42501' || error.message?.toLowerCase().includes('policy') || error.message?.toLowerCase().includes('permission')) {
+        return {
+          success: true,
+          message: 'اتصال به Supabase برقرار است (نیاز به اجرای کد SQL جهت فعال‌سازی Policyهای RLS)',
           latencyMs
         };
       }
@@ -79,7 +85,17 @@ export async function syncHospitalDataToSupabase(
           message: 'جدول hospital_cloud_sync در Supabase ایجاد نشده است. لطفاً اسکریپت SQL پیشنهادی را در پنل Supabase اجرا کنید.'
         };
       }
-      throw error;
+      if (error.code === '42501' || error.message?.toLowerCase().includes('policy') || error.message?.toLowerCase().includes('permission')) {
+        return {
+          success: false,
+          message: 'خطای سطح دسترسی (RLS): لطفاً اسکریپت SQL شامل Policyهای دسترسی را در Supabase اجرا کنید.'
+        };
+      }
+      console.warn('Supabase sync warning:', error.message);
+      return {
+        success: false,
+        message: 'خطا در ذخیره‌سازی ابری: ' + (error.message || 'خطای ناشناخته')
+      };
     }
 
     return {
@@ -87,7 +103,7 @@ export async function syncHospitalDataToSupabase(
       message: 'تمامی داده‌های بیماران، پیام‌ها و چک‌لیست‌ها با موفقیت در فضای ابری Supabase همگام‌سازی شد.'
     };
   } catch (err: any) {
-    console.error('Supabase sync error:', err);
+    console.warn('Supabase sync exception:', err?.message || err);
     return {
       success: false,
       message: 'خطا در ذخیره‌سازی ابری: ' + (err?.message || 'خطای ناشناخته')
@@ -113,7 +129,7 @@ export async function fetchHospitalDataFromSupabase(): Promise<{
       .from('hospital_cloud_sync')
       .select('*')
       .eq('id', 'main_hospital_snapshot')
-      .single();
+      .maybeSingle();
 
     if (error) {
       if (error.code === 'PGRST116') {
@@ -122,7 +138,17 @@ export async function fetchHospitalDataFromSupabase(): Promise<{
       if (error.code === '42P01' || error.message?.toLowerCase().includes('relation')) {
         return { success: false, message: 'جدول ابری hospital_cloud_sync در Supabase هنوز ایجاد نشده است.' };
       }
-      throw error;
+      if (error.code === '42501' || error.message?.toLowerCase().includes('policy') || error.message?.toLowerCase().includes('permission')) {
+        return {
+          success: false,
+          message: 'دسترسی RLS در Supabase محدود است. لطفاً کدهای Policy را در بخش SQL Editor پروژه Supabase اجرا کنید.'
+        };
+      }
+      console.warn('Supabase fetch warning:', error.message);
+      return {
+        success: false,
+        message: 'خطا در دریافت اطلاعات: ' + (error.message || 'خطای شبکه')
+      };
     }
 
     if (!data) {
@@ -140,7 +166,7 @@ export async function fetchHospitalDataFromSupabase(): Promise<{
       message: `اطلاعات با موفقیت از سرور ابری Supabase بارگذاری شد (آخرین بروزرسانی: ${data.updated_at ? new Date(data.updated_at).toLocaleTimeString('fa-IR') : 'نامشخص'})`
     };
   } catch (err: any) {
-    console.error('Supabase fetch error:', err);
+    console.warn('Supabase fetch exception:', err?.message || err);
     return {
       success: false,
       message: 'خطا در دریافت اطلاعات از Supabase: ' + (err?.message || 'خطای شبکه')
@@ -152,7 +178,9 @@ export async function fetchHospitalDataFromSupabase(): Promise<{
  * Returns SQL code to create the required table in Supabase SQL Editor.
  */
 export function getSupabaseSetupSQL(): string {
-  return `-- کد SQL جهت ایجاد جدول همگام‌سازی اطلاعات بیمارستان در Supabase
+  return `-- ================================================================
+-- ۱. ایجاد جدول اصلی همگام‌سازی ابری اطلاعات بیمارستان
+-- ================================================================
 CREATE TABLE IF NOT EXISTS hospital_cloud_sync (
   id TEXT PRIMARY KEY,
   updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -162,11 +190,60 @@ CREATE TABLE IF NOT EXISTS hospital_cloud_sync (
   checklists_json TEXT
 );
 
--- فعال‌سازی دسترسی‌های لازم (Row Level Security)
+-- ۲. فعال‌سازی دسترسی امنیتی سطح سطر (RLS)
 ALTER TABLE hospital_cloud_sync ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Allow All Access" ON hospital_cloud_sync
-  FOR ALL
-  USING (true)
-  WITH CHECK (true);`;
+-- ۳. حذف Policyهای قدیمی در صورت وجود
+DROP POLICY IF EXISTS "Enable read access for all users" ON hospital_cloud_sync;
+DROP POLICY IF EXISTS "Enable insert access for all users" ON hospital_cloud_sync;
+DROP POLICY IF EXISTS "Enable update access for all users" ON hospital_cloud_sync;
+DROP POLICY IF EXISTS "Enable delete access for all users" ON hospital_cloud_sync;
+
+-- ۴. تعریف Policy دسترسی خواندن (SELECT)
+CREATE POLICY "Enable read access for all users"
+ON hospital_cloud_sync FOR SELECT
+TO public, anon, authenticated
+USING (true);
+
+-- ۵. تعریف Policy دسترسی ایجاد رکورد (INSERT)
+CREATE POLICY "Enable insert access for all users"
+ON hospital_cloud_sync FOR INSERT
+TO public, anon, authenticated
+WITH CHECK (true);
+
+-- ۶. تعریف Policy دسترسی ویرایش رکورد (UPDATE)
+CREATE POLICY "Enable update access for all users"
+ON hospital_cloud_sync FOR UPDATE
+TO public, anon, authenticated
+USING (true)
+WITH CHECK (true);
+
+-- ۷. تعریف Policy دسترسی حذف رکورد (DELETE)
+CREATE POLICY "Enable delete access for all users"
+ON hospital_cloud_sync FOR DELETE
+TO public, anon, authenticated
+USING (true);
+
+GRANT ALL ON TABLE hospital_cloud_sync TO anon, authenticated, public;
+
+-- ================================================================
+-- ۸. اعطای دسترسی Policy به سایر جداول (در صورت ایجاد توسط کاربر)
+-- ================================================================
+-- اگر جداول جداگانه patients, messages, complaints, checklists یا todos ایجاد کرده‌اید:
+DO $$
+DECLARE
+  t text;
+BEGIN
+  FOR t IN SELECT table_name FROM information_schema.tables 
+           WHERE table_schema = 'public' 
+             AND table_name IN ('patients', 'messages', 'complaints', 'checklists', 'custom_checklists', 'todos')
+  LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY;', t);
+    EXECUTE format('DROP POLICY IF EXISTS "Allow All %I" ON public.%I;', t, t);
+    EXECUTE format('CREATE POLICY "Allow All %I" ON public.%I FOR ALL TO public, anon, authenticated USING (true) WITH CHECK (true);', t, t);
+    EXECUTE format('GRANT ALL ON TABLE public.%I TO anon, authenticated, public;', t);
+  END LOOP;
+END
+$$;`;
 }
+
