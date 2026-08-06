@@ -74,6 +74,9 @@ import {
   testSupabaseConnection,
   syncHospitalDataToSupabase,
   fetchHospitalDataFromSupabase,
+  fetchMessagesFromSupabase,
+  mergeMessageArrays,
+  mergePatientArrays,
   getSupabaseSetupSQL
 } from './utils/supabase';
 import { motion, AnimatePresence } from 'motion/react';
@@ -554,13 +557,12 @@ export default function App() {
       safeLocalStorageSet('hospital_diseases', JSON.stringify(DISEASES));
       safeLocalStorageSet('hospital_departments', JSON.stringify(DEPARTMENTS));
     } else {
-      const loadedPatients = JSON.parse(storedPatients!) as Patient[];
-      const demoNames = ["علی علوی", "مریم سادات حسینی", "رضا احمدی", "فاطمه رضایی", "پیمان ناصری"];
-      const filteredPatients = loadedPatients.filter(p => !demoNames.includes(p.name));
-      setPatients(filteredPatients);
-      if (filteredPatients.length !== loadedPatients.length) {
-        safeLocalStorageSet('hospital_patients', JSON.stringify(filteredPatients));
-      }
+      const loadedPatients = (JSON.parse(storedPatients!) as Patient[]) || [];
+      const normalizedPatients = loadedPatients.map(p => ({
+        ...p,
+        name: (p.name && p.name.trim()) ? p.name : `بیمار کد ${p.userCode || p.nationalId || 'نامشخص'}`
+      }));
+      setPatients(normalizedPatients);
       setAdmins(JSON.parse(storedAdmins!));
       setMessages(JSON.parse(storedMessages!));
       setDiseases(JSON.parse(storedDiseases!));
@@ -628,8 +630,12 @@ export default function App() {
   };
 
   const savePatients = (newPatients: Patient[]) => {
-    setPatients(newPatients);
-    safeLocalStorageSet('hospital_patients', JSON.stringify(newPatients));
+    setPatients(prev => {
+      const merged = mergePatientArrays(prev, newPatients);
+      safeLocalStorageSet('hospital_patients', JSON.stringify(merged));
+      syncHospitalDataToSupabase(merged, messages, complaints, customChecklists, newsBanners, diseases, departments, admins, admissionHistory).catch(() => {});
+      return merged;
+    });
   };
 
   const saveAdmins = (newAdmins: AdminUser[]) => {
@@ -638,8 +644,12 @@ export default function App() {
   };
 
   const saveMessages = (newMessages: Message[]) => {
-    setMessages(newMessages);
-    safeLocalStorageSet('hospital_messages', JSON.stringify(newMessages));
+    setMessages(prev => {
+      const merged = mergeMessageArrays(prev, newMessages);
+      safeLocalStorageSet('hospital_messages', JSON.stringify(merged));
+      syncHospitalDataToSupabase(patients, merged, complaints, customChecklists, newsBanners, diseases, departments, admins, admissionHistory).catch(() => {});
+      return merged;
+    });
   };
 
   const saveDiseases = (newDiseases: Disease[]) => {
@@ -668,7 +678,9 @@ export default function App() {
   };
 
   // --- Premium Chat States ---
-  const [activeChatPatientId, setActiveChatPatientId] = useState<string | null>(null);
+  const [activeChatPatientId, setActiveChatPatientId] = useState<string | null>(() => {
+    return localStorage.getItem('hospital_session_active_chat') || null;
+  });
   const [chatSearchQuery, setChatSearchQuery] = useState<string>('');
   const [chatFilter, setChatFilter] = useState<'all' | 'unanswered' | 'answered'>('all');
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
@@ -710,7 +722,9 @@ export default function App() {
 
   // --- Router & App Navigation ---
   // Screens: 'welcome' | 'hub' | 'db_departments' | 'patient_login' | 'patient_dashboard' | 'admin_dashboard'
-  const [currentScreen, setCurrentScreen] = useState<string>('welcome');
+  const [currentScreen, setCurrentScreen] = useState<string>(() => {
+    return localStorage.getItem('hospital_session_screen') || 'welcome';
+  });
   const [welcomeColor, setWelcomeColor] = useState<'red' | 'green' | 'blue' | 'purple' | 'pink'>('red');
 
   // Automatically cycle through the heart colors smoothly like a living heart when on welcome screen
@@ -775,8 +789,56 @@ export default function App() {
   };
 
   // Login contexts
-  const [currentUser, setCurrentUser] = useState<Patient | null>(null);
-  const [currentAdmin, setCurrentAdmin] = useState<AdminUser | null>(null);
+  const [currentUser, setCurrentUser] = useState<Patient | null>(() => {
+    const stored = localStorage.getItem('hospital_session_patient');
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (parsed && parsed.nationalId) return parsed;
+      } catch (e) {}
+    }
+    return null;
+  });
+
+  const [currentAdmin, setCurrentAdmin] = useState<AdminUser | null>(() => {
+    const stored = localStorage.getItem('hospital_session_admin');
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (parsed && parsed.username) return parsed;
+      } catch (e) {}
+    }
+    return null;
+  });
+
+  // Persist session across page refreshes
+  useEffect(() => {
+    if (currentScreen) safeLocalStorageSet('hospital_session_screen', currentScreen);
+  }, [currentScreen]);
+
+  useEffect(() => {
+    if (currentUser) {
+      safeLocalStorageSet('hospital_session_patient', JSON.stringify(currentUser));
+    } else {
+      localStorage.removeItem('hospital_session_patient');
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (currentAdmin) {
+      safeLocalStorageSet('hospital_session_admin', JSON.stringify(currentAdmin));
+    } else {
+      localStorage.removeItem('hospital_session_admin');
+    }
+  }, [currentAdmin]);
+
+  useEffect(() => {
+    if (activeChatPatientId) {
+      safeLocalStorageSet('hospital_session_active_chat', activeChatPatientId);
+    } else {
+      localStorage.removeItem('hospital_session_active_chat');
+    }
+  }, [activeChatPatientId]);
 
   // Department database state
   const [selectedDept, setSelectedDept] = useState<Department | null>(null);
@@ -858,12 +920,18 @@ export default function App() {
         const fetchRes = await fetchHospitalDataFromSupabase();
         if (fetchRes.success && fetchRes.data) {
           if (fetchRes.data.patients && fetchRes.data.patients.length > 0) {
-            setPatients(fetchRes.data.patients);
-            safeLocalStorageSet('hospital_patients', JSON.stringify(fetchRes.data.patients));
+            setPatients(prevLocal => {
+              const merged = mergePatientArrays(prevLocal, fetchRes.data.patients);
+              safeLocalStorageSet('hospital_patients', JSON.stringify(merged));
+              return merged;
+            });
           }
           if (fetchRes.data.messages && fetchRes.data.messages.length > 0) {
-            setMessages(fetchRes.data.messages);
-            safeLocalStorageSet('hospital_messages', JSON.stringify(fetchRes.data.messages));
+            setMessages(prevLocal => {
+              const merged = mergeMessageArrays(prevLocal, fetchRes.data.messages);
+              safeLocalStorageSet('hospital_messages', JSON.stringify(merged));
+              return merged;
+            });
           }
           if (fetchRes.data.complaints && fetchRes.data.complaints.length > 0) {
             setComplaints(fetchRes.data.complaints);
@@ -1057,10 +1125,59 @@ export default function App() {
     return () => clearInterval(slideshowInterval);
   }, [newsBanners]);
 
+  // Real-time Chat Messages Auto-Sync (Polling & Supabase Realtime)
+  useEffect(() => {
+    let isMounted = true;
+
+    const pollMessages = async () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const remoteMsgs = await fetchMessagesFromSupabase();
+        if (remoteMsgs && remoteMsgs.length > 0 && isMounted) {
+          setMessages((prevLocal) => {
+            const merged = mergeMessageArrays(prevLocal, remoteMsgs);
+            const prevJson = JSON.stringify(prevLocal);
+            const mergedJson = JSON.stringify(merged);
+            if (prevJson !== mergedJson) {
+              safeLocalStorageSet('hospital_messages', mergedJson);
+              return merged;
+            }
+            return prevLocal;
+          });
+        }
+      } catch (e) {}
+    };
+
+    // Fast 1-second auto-polling for instant real-time message exchange without manual refresh
+    const intervalId = setInterval(pollMessages, 1000);
+
+    // Also listen to Supabase Realtime table changes
+    const channel = supabase
+      .channel('realtime_chat_messages_sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'hospital_messages' }, () => {
+        pollMessages();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'hospital_cloud_sync' }, () => {
+        pollMessages();
+      })
+      .subscribe();
+
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
   // Handle Logouts
   const handleLogout = () => {
     setCurrentUser(null);
     setCurrentAdmin(null);
+    setActiveChatPatientId(null);
+    localStorage.removeItem('hospital_session_patient');
+    localStorage.removeItem('hospital_session_admin');
+    localStorage.removeItem('hospital_session_active_chat');
+    safeLocalStorageSet('hospital_session_screen', 'hub');
     setCurrentScreen('hub');
   };
 
@@ -1230,8 +1347,8 @@ export default function App() {
 
     const targetDeptId = currentAdmin?.role === 'super' ? regDeptId : currentAdmin?.departmentId;
 
-    if (!regNationalId || !regFileNumber || !regName || !regAge || !regPhone || !regDiseaseName || !targetDeptId) {
-      setRegErrorMsg('لطفاً تمامی فیلدهای فرم را به دقت تکمیل فرمایید.');
+    if (!regNationalId || !regFileNumber || !regName || !regAge || !regPhone || !regDiseaseName || !targetDeptId || !regUserCode.trim() || !regPassword.trim()) {
+      setRegErrorMsg('لطفاً تمامی فیلدهای فرم اعم از کد ملی، شماره پرونده، نام بیمار، کد کاربری و رمز ورود را به دقت تکمیل فرمایید.');
       return;
     }
 
@@ -4279,162 +4396,167 @@ export default function App() {
               exit={{ opacity: 0 }}
               className="max-w-7xl mx-auto px-4 py-8 animate-fade-in"
             >
-              {/* Profile Card Summary */}
-              <div className="bg-slate-900 border border-slate-800 text-white rounded-[2.5rem] p-6 md:p-8 shadow-2xl mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-6 relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-48 h-48 bg-gradient-to-bl from-sky-400/10 to-transparent rounded-bl-full pointer-events-none" />
+              {/* MAIN DASHBOARD CONTAINER: ONLY SHOW PROFILE & TRIAGE CARDS WHEN ON MAIN GRID TAB */}
+              {patientTab === 'grid' && (
+                <>
+                  {/* Profile Card Summary */}
+                  <div className="bg-slate-900 border border-slate-800 text-white rounded-[2.5rem] p-6 md:p-8 shadow-2xl mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-6 relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-48 h-48 bg-gradient-to-bl from-sky-400/10 to-transparent rounded-bl-full pointer-events-none" />
 
-                <div className="z-10 text-right">
-                  <div className="flex items-center gap-2 text-sky-300 text-xs font-bold mb-2">
-                    <UserCheck className="w-4 h-4 text-emerald-400" />
-                    <span>پورتال بیمار • پرونده درمانی فعال</span>
+                    <div className="z-10 text-right">
+                      <div className="flex items-center gap-2 text-sky-300 text-xs font-bold mb-2">
+                        <UserCheck className="w-4 h-4 text-emerald-400" />
+                        <span>پورتال بیمار • پرونده درمانی فعال</span>
+                      </div>
+                      <h2 className="text-2xl md:text-3xl font-black mb-3 text-white">بیمار گرامی: {currentUser.name}</h2>
+                      <div className="flex flex-wrap gap-x-6 gap-y-3.5 text-xs md:text-sm text-slate-200 font-medium">
+                        <span><strong>شماره پرونده:</strong> <span className="text-sky-300 font-bold">{currentUser.fileNumber}</span></span>
+                        <span><strong>کد ملی:</strong> <span className="text-sky-300 font-bold">{currentUser.nationalId}</span></span>
+                        <span><strong>بخش بستری:</strong> <span className="text-indigo-300 font-bold">{departments.find(d => d.id === currentUser.departmentId)?.name}</span></span>
+                        <span><strong>نوع بیماری:</strong> <span className="text-indigo-300 font-bold">{diseases.find(d => d.id === currentUser.diseaseId)?.name}</span></span>
+                      </div>
+                    </div>
+
+                    {/* Logout and Status Box */}
+                    <div className="flex flex-col sm:flex-row md:flex-col lg:flex-row items-stretch sm:items-center md:items-stretch lg:items-center gap-4 self-stretch md:self-auto shrink-0 z-10">
+                      <button
+                        onClick={() => {
+                          setCurrentUser(null);
+                          setCurrentScreen('hub');
+                        }}
+                        className="inline-flex items-center justify-center gap-2 bg-rose-600/95 hover:bg-rose-700 text-white text-xs font-bold px-4 py-3 rounded-xl transition-all duration-300 cursor-pointer shadow-md hover:scale-[1.02] active:scale-100"
+                      >
+                        <ArrowRight className="w-4 h-4" />
+                        <span>خروج از کارتابل بیمار</span>
+                      </button>
+
+                      <div className={`border rounded-2xl p-4 flex flex-col justify-center items-center shadow-inner transition-all duration-300 ${currentUser.satisfactionSurvey ? 'bg-emerald-500/20 border-emerald-500/40 shadow-emerald-950/20' : 'bg-white/10 border-white/20'}`}>
+                        <span className="text-[11px] text-slate-300 mb-1.5 font-bold">آخرین وضعیت ارزیابی شما:</span>
+                        {currentUser.satisfactionSurvey ? (
+                          <span className="text-xs font-black bg-emerald-500 text-white px-3 py-1 rounded-full border border-emerald-400 shadow-md">ثبت رضایت‌سنجی (سبز)</span>
+                        ) : currentUser.followupStatus === 'pending' ? (
+                          <span className="text-xs font-black bg-slate-800/80 text-slate-300 px-3 py-1 rounded-full border border-white/10">ثبت نشده</span>
+                        ) : currentUser.followupStatus === 'green' ? (
+                          <span className="text-xs font-black bg-emerald-500/20 text-emerald-300 px-3 py-1 rounded-full border border-emerald-500/30 shadow-md">منطقه سبز (ایمن)</span>
+                        ) : currentUser.followupStatus === 'yellow' ? (
+                          <span className="text-xs font-black bg-amber-500/20 text-amber-300 px-3 py-1 rounded-full border border-amber-500/30 shadow-md">منطقه زرد (هشدار)</span>
+                        ) : (
+                          <span className="text-xs font-black bg-rose-500/20 text-rose-300 px-3 py-1 rounded-full border border-rose-500/30 shadow-md animate-pulse">منطقه قرمز (اورژانس)</span>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  <h2 className="text-2xl md:text-3xl font-black mb-3 text-white">بیمار گرامی: {currentUser.name}</h2>
-                  <div className="flex flex-wrap gap-x-6 gap-y-3.5 text-xs md:text-sm text-slate-200 font-medium">
-                    <span><strong>شماره پرونده:</strong> <span className="text-sky-300 font-bold">{currentUser.fileNumber}</span></span>
-                    <span><strong>کد ملی:</strong> <span className="text-sky-300 font-bold">{currentUser.nationalId}</span></span>
-                    <span><strong>بخش بستری:</strong> <span className="text-indigo-300 font-bold">{departments.find(d => d.id === currentUser.departmentId)?.name}</span></span>
-                    <span><strong>نوع بیماری:</strong> <span className="text-indigo-300 font-bold">{diseases.find(d => d.id === currentUser.diseaseId)?.name}</span></span>
-                  </div>
-                </div>
 
-                {/* Logout and Status Box */}
-                <div className="flex flex-col sm:flex-row md:flex-col lg:flex-row items-stretch sm:items-center md:items-stretch lg:items-center gap-4 self-stretch md:self-auto shrink-0 z-10">
-                  <button
-                    onClick={() => {
-                      setCurrentUser(null);
-                      setCurrentScreen('hub');
-                    }}
-                    className="inline-flex items-center justify-center gap-2 bg-rose-600/95 hover:bg-rose-700 text-white text-xs font-bold px-4 py-3 rounded-xl transition-all duration-300 cursor-pointer shadow-md hover:scale-[1.02] active:scale-100"
-                  >
-                    <ArrowRight className="w-4 h-4" />
-                    <span>خروج از کارتابل بیمار</span>
-                  </button>
-
-                  <div className={`border rounded-2xl p-4 flex flex-col justify-center items-center shadow-inner transition-all duration-300 ${currentUser.satisfactionSurvey ? 'bg-emerald-500/20 border-emerald-500/40 shadow-emerald-950/20' : 'bg-white/10 border-white/20'}`}>
-                    <span className="text-[11px] text-slate-300 mb-1.5 font-bold">آخرین وضعیت ارزیابی شما:</span>
-                    {currentUser.satisfactionSurvey ? (
-                      <span className="text-xs font-black bg-emerald-500 text-white px-3 py-1 rounded-full border border-emerald-400 shadow-md">ثبت رضایت‌سنجی (سبز)</span>
-                    ) : currentUser.followupStatus === 'pending' ? (
-                      <span className="text-xs font-black bg-slate-800/80 text-slate-300 px-3 py-1 rounded-full border border-white/10">ثبت نشده</span>
-                    ) : currentUser.followupStatus === 'green' ? (
-                      <span className="text-xs font-black bg-emerald-500/20 text-emerald-300 px-3 py-1 rounded-full border border-emerald-500/30 shadow-md">منطقه سبز (ایمن)</span>
+                  {/* TRIAGE STATUS COLOR BOX AT TOP OF PATIENT PANEL */}
+                  <div className="mb-8">
+                    {currentUser.followupStatus === 'red' ? (
+                      <div className="bg-gradient-to-r from-rose-600 via-red-600 to-rose-700 border-2 border-rose-400 text-white rounded-[2rem] p-5 sm:p-6 shadow-xl shadow-rose-950/30 relative overflow-hidden">
+                        <div className="flex items-center gap-4">
+                          <div className="bg-white/20 p-3 sm:p-4 rounded-2xl border border-white/30 shrink-0">
+                            <AlertTriangle className="w-7 h-7 sm:w-8 sm:h-8 text-white animate-bounce" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="bg-white text-rose-700 text-xs font-black px-3 py-1 rounded-full shadow">
+                                وضعیت تریاژ بیمار: سطح قرمز
+                              </span>
+                              <span className="text-[11px] font-bold text-rose-100">وضعیت کنترل‌نشده</span>
+                            </div>
+                            <h4 className="text-base sm:text-lg font-black text-white">وضعیت بیماری شما هنوز کنترل نشده است</h4>
+                            <p className="text-xs text-rose-100 mt-1 font-bold leading-relaxed">
+                              در صورت بروز علائم حاد یا شدیدتر شدن بیماری، سریعاً به اورژانس بیمارستان مراجعه کرده یا با شماره ۱۱۵ تماس بگیرید.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
                     ) : currentUser.followupStatus === 'yellow' ? (
-                      <span className="text-xs font-black bg-amber-500/20 text-amber-300 px-3 py-1 rounded-full border border-amber-500/30 shadow-md">منطقه زرد (هشدار)</span>
+                      <div className="bg-gradient-to-r from-amber-500 via-yellow-600 to-amber-600 border-2 border-amber-400 text-white rounded-[2rem] p-5 sm:p-6 shadow-xl shadow-amber-950/30 relative overflow-hidden">
+                        <div className="flex items-center gap-4">
+                          <div className="bg-white/20 p-3 sm:p-4 rounded-2xl border border-white/30 shrink-0">
+                            <AlertCircle className="w-7 h-7 sm:w-8 sm:h-8 text-white" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="bg-white text-amber-800 text-xs font-black px-3 py-1 rounded-full shadow">
+                                وضعیت تریاژ بیمار: سطح زرد
+                              </span>
+                              <span className="text-[11px] font-bold text-amber-100">کنترل ناکافی</span>
+                            </div>
+                            <h4 className="text-base sm:text-lg font-black text-white">وضعیت بیماری شما به‌صورت ناکافی کنترل شده است</h4>
+                            <p className="text-xs text-amber-100 mt-1 font-bold leading-relaxed">
+                              لطفاً پایش روزانه علائم و مصرف دقیق داروها را ادامه دهید و جهت مشاوره با کادر درمان از بخش پرسش و پاسخ پیام بفرستید.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    ) : currentUser.followupStatus === 'green' ? (
+                      <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 border-2 border-emerald-400 text-white rounded-[2rem] p-5 sm:p-6 shadow-xl shadow-emerald-950/30 relative overflow-hidden">
+                        <div className="flex items-center gap-4">
+                          <div className="bg-white/20 p-3 sm:p-4 rounded-2xl border border-white/30 shrink-0">
+                            <CheckCircle2 className="w-7 h-7 sm:w-8 sm:h-8 text-white" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="bg-white text-emerald-800 text-xs font-black px-3 py-1 rounded-full shadow">
+                                وضعیت تریاژ بیمار: سطح سبز
+                              </span>
+                              <span className="text-[11px] font-bold text-emerald-100">وضعیت ایمن</span>
+                            </div>
+                            <h4 className="text-base sm:text-lg font-black text-white">وضعیت بیماری شما کنترل و در محدوده ایمن است</h4>
+                            <p className="text-xs text-emerald-100 mt-1 font-bold leading-relaxed">
+                              شرایط درمانی شما مطلوب می‌باشد. رعایت توصیه‌های خودمراقبتی و ادامه رژیم درمانی ابلاغ‌شده الزامی است.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
                     ) : (
-                      <span className="text-xs font-black bg-rose-500/20 text-rose-300 px-3 py-1 rounded-full border border-rose-500/30 shadow-md animate-pulse">منطقه قرمز (اورژانس)</span>
+                      <div className="bg-gradient-to-r from-slate-700 via-slate-800 to-slate-900 border-2 border-slate-600 text-white rounded-[2rem] p-5 sm:p-6 shadow-xl relative overflow-hidden">
+                        <div className="flex items-center gap-4">
+                          <div className="bg-white/10 p-3 sm:p-4 rounded-2xl border border-white/20 shrink-0">
+                            <Clock className="w-7 h-7 sm:w-8 sm:h-8 text-slate-300" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="bg-slate-600 text-white text-xs font-black px-3 py-1 rounded-full">
+                                وضعیت تریاژ بیمار: در انتظار ارزیابی
+                              </span>
+                            </div>
+                            <h4 className="text-base sm:text-lg font-black text-white">ارزیابی اولیه‌ی سطح تریاژ انجام نشده است</h4>
+                            <p className="text-xs text-slate-300 mt-1 font-bold leading-relaxed">
+                              کادر درمان بخش پس از بررسی گزارش‌های شما سطح تریاژ را به‌روزرسانی خواهند کرد.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
                     )}
                   </div>
-                </div>
-              </div>
 
-              {/* TRIAGE STATUS COLOR BOX AT TOP OF PATIENT PANEL */}
-              <div className="mb-8">
-                {currentUser.followupStatus === 'red' ? (
-                  <div className="bg-gradient-to-r from-rose-600 via-red-600 to-rose-700 border-2 border-rose-400 text-white rounded-[2rem] p-5 sm:p-6 shadow-xl shadow-rose-950/30 relative overflow-hidden">
-                    <div className="flex items-center gap-4">
-                      <div className="bg-white/20 p-3 sm:p-4 rounded-2xl border border-white/30 shrink-0">
-                        <AlertTriangle className="w-7 h-7 sm:w-8 sm:h-8 text-white animate-bounce" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="bg-white text-rose-700 text-xs font-black px-3 py-1 rounded-full shadow">
-                            وضعیت تریاژ بیمار: سطح قرمز
-                          </span>
-                          <span className="text-[11px] font-bold text-rose-100">وضعیت کنترل‌نشده</span>
+                  {/* SURVEY SUCCESS NOTIFICATION ALERT */}
+                  {showSurveySuccessNotification && (
+                    <div className="bg-gradient-to-r from-emerald-500 via-teal-600 to-emerald-600 border-2 border-emerald-400 text-white rounded-[2rem] p-6 shadow-xl mb-8 relative overflow-hidden animate-fade-in text-right">
+                      <div className="absolute -left-10 -bottom-10 w-40 h-40 bg-white/10 rounded-full pointer-events-none" />
+                      <div className="flex items-start justify-between gap-4 relative z-10">
+                        <div className="flex items-center gap-4">
+                          <div className="bg-white/20 p-3.5 rounded-2xl border border-white/20 shrink-0">
+                            <Smile className="w-8 h-8 text-white animate-bounce-slow" />
+                          </div>
+                          <div>
+                            <h4 className="text-lg font-black mb-1.5">ارزیابی رضایت‌مندی شما با موفقیت ثبت شد!</h4>
+                            <p className="text-xs text-emerald-50/90 leading-relaxed font-semibold">
+                              بیمار گرامی؛ نظرات ارزشمند شما با موفقیت در سامانه بیمارستان ثبت گردید. کادر درمانی از پاسخ‌دهی شما کمال تشکر را دارد. آخرین وضعیت ارزیابی شما هم‌اکنون به حالت ایمن و ثبت رضایت‌مندی (سبز) تغییر یافته است.
+                            </p>
+                          </div>
                         </div>
-                        <h4 className="text-base sm:text-lg font-black text-white">وضعیت بیماری شما هنوز کنترل نشده است</h4>
-                        <p className="text-xs text-rose-100 mt-1 font-bold leading-relaxed">
-                          در صورت بروز علائم حاد یا شدیدتر شدن بیماری، سریعاً به اورژانس بیمارستان مراجعه کرده یا با شماره ۱۱۵ تماس بگیرید.
-                        </p>
+                        <button
+                          onClick={() => setShowSurveySuccessNotification(false)}
+                          className="text-white bg-black/20 hover:bg-black/35 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap self-center shrink-0 cursor-pointer"
+                        >
+                          بستن اعلان
+                        </button>
                       </div>
                     </div>
-                  </div>
-                ) : currentUser.followupStatus === 'yellow' ? (
-                  <div className="bg-gradient-to-r from-amber-500 via-yellow-600 to-amber-600 border-2 border-amber-400 text-white rounded-[2rem] p-5 sm:p-6 shadow-xl shadow-amber-950/30 relative overflow-hidden">
-                    <div className="flex items-center gap-4">
-                      <div className="bg-white/20 p-3 sm:p-4 rounded-2xl border border-white/30 shrink-0">
-                        <AlertCircle className="w-7 h-7 sm:w-8 sm:h-8 text-white" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="bg-white text-amber-800 text-xs font-black px-3 py-1 rounded-full shadow">
-                            وضعیت تریاژ بیمار: سطح زرد
-                          </span>
-                          <span className="text-[11px] font-bold text-amber-100">کنترل ناکافی</span>
-                        </div>
-                        <h4 className="text-base sm:text-lg font-black text-white">وضعیت بیماری شما به‌صورت ناکافی کنترل شده است</h4>
-                        <p className="text-xs text-amber-100 mt-1 font-bold leading-relaxed">
-                          لطفاً پایش روزانه علائم و مصرف دقیق داروها را ادامه دهید و جهت مشاوره با کادر درمان از بخش پرسش و پاسخ پیام بفرستید.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                ) : currentUser.followupStatus === 'green' ? (
-                  <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 border-2 border-emerald-400 text-white rounded-[2rem] p-5 sm:p-6 shadow-xl shadow-emerald-950/30 relative overflow-hidden">
-                    <div className="flex items-center gap-4">
-                      <div className="bg-white/20 p-3 sm:p-4 rounded-2xl border border-white/30 shrink-0">
-                        <CheckCircle2 className="w-7 h-7 sm:w-8 sm:h-8 text-white" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="bg-white text-emerald-800 text-xs font-black px-3 py-1 rounded-full shadow">
-                            وضعیت تریاژ بیمار: سطح سبز
-                          </span>
-                          <span className="text-[11px] font-bold text-emerald-100">وضعیت ایمن</span>
-                        </div>
-                        <h4 className="text-base sm:text-lg font-black text-white">وضعیت بیماری شما کنترل و در محدوده ایمن است</h4>
-                        <p className="text-xs text-emerald-100 mt-1 font-bold leading-relaxed">
-                          شرایط درمانی شما مطلوب می‌باشد. رعایت توصیه‌های خودمراقبتی و ادامه رژیم درمانی ابلاغ‌شده الزامی است.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="bg-gradient-to-r from-slate-700 via-slate-800 to-slate-900 border-2 border-slate-600 text-white rounded-[2rem] p-5 sm:p-6 shadow-xl relative overflow-hidden">
-                    <div className="flex items-center gap-4">
-                      <div className="bg-white/10 p-3 sm:p-4 rounded-2xl border border-white/20 shrink-0">
-                        <Clock className="w-7 h-7 sm:w-8 sm:h-8 text-slate-300" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="bg-slate-600 text-white text-xs font-black px-3 py-1 rounded-full">
-                            وضعیت تریاژ بیمار: در انتظار ارزیابی
-                          </span>
-                        </div>
-                        <h4 className="text-base sm:text-lg font-black text-white">ارزیابی اولیه‌ی سطح تریاژ انجام نشده است</h4>
-                        <p className="text-xs text-slate-300 mt-1 font-bold leading-relaxed">
-                          کادر درمان بخش پس از بررسی گزارش‌های شما سطح تریاژ را به‌روزرسانی خواهند کرد.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* SURVEY SUCCESS NOTIFICATION ALERT */}
-              {showSurveySuccessNotification && (
-                <div className="bg-gradient-to-r from-emerald-500 via-teal-600 to-emerald-600 border-2 border-emerald-400 text-white rounded-[2rem] p-6 shadow-xl mb-8 relative overflow-hidden animate-fade-in text-right">
-                  <div className="absolute -left-10 -bottom-10 w-40 h-40 bg-white/10 rounded-full pointer-events-none" />
-                  <div className="flex items-start justify-between gap-4 relative z-10">
-                    <div className="flex items-center gap-4">
-                      <div className="bg-white/20 p-3.5 rounded-2xl border border-white/20 shrink-0">
-                        <Smile className="w-8 h-8 text-white animate-bounce-slow" />
-                      </div>
-                      <div>
-                        <h4 className="text-lg font-black mb-1.5">ارزیابی رضایت‌مندی شما با موفقیت ثبت شد!</h4>
-                        <p className="text-xs text-emerald-50/90 leading-relaxed font-semibold">
-                          بیمار گرامی؛ نظرات ارزشمند شما با موفقیت در سامانه بیمارستان ثبت گردید. کادر درمانی از پاسخ‌دهی شما کمال تشکر را دارد. آخرین وضعیت ارزیابی شما هم‌اکنون به حالت ایمن و ثبت رضایت‌مندی (سبز) تغییر یافته است.
-                        </p>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => setShowSurveySuccessNotification(false)}
-                      className="text-white bg-black/20 hover:bg-black/35 px-4 py-2 rounded-xl text-xs font-black transition-all whitespace-nowrap self-center shrink-0 cursor-pointer"
-                    >
-                      بستن اعلان
-                    </button>
-                  </div>
-                </div>
+                  )}
+                </>
               )}
 
               {/* TILE NAVIGATION FOR MAIN PATIENT DASHBOARD */}
@@ -4644,73 +4766,68 @@ export default function App() {
                         <div>
                           <h4 className="text-sm font-black text-slate-800">گفتگو با کادر درمان بیمارستان</h4>
                           <span className="text-[10px] text-emerald-600 flex items-center gap-1 font-bold mt-0.5">
-                            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping" />
-                            <span>مسئولین بخش آنلاین هستند</span>
+                            <span className="w-2 h-2 bg-emerald-500 rounded-full animate-ping shrink-0" />
+                            <span>همگام‌سازی لحظه‌ای چت فعال است (ارسال و دریافت زنده)</span>
                           </span>
                         </div>
                       </div>
-                      <span className="text-[11px] bg-white border border-slate-200 text-slate-700 px-3 py-1 rounded-full font-mono font-black">
-                        تعداد پیام‌ها: {messages.filter(m => m.patientId === currentUser.nationalId).length}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const remoteMsgs = await fetchMessagesFromSupabase();
+                            if (remoteMsgs) {
+                              setMessages(prev => {
+                                const merged = mergeMessageArrays(prev, remoteMsgs);
+                                safeLocalStorageSet('hospital_messages', JSON.stringify(merged));
+                                return merged;
+                              });
+                            }
+                          }}
+                          className="text-[11px] bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-bold flex items-center gap-1 cursor-pointer shadow-sm transition-all active:scale-95"
+                          title="بروزرسانی پیام‌ها"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>بروزرسانی</span>
+                        </button>
+                        <span className="text-[11px] bg-white border border-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-mono font-black">
+                          تعداد پیام‌ها: {messages.filter(m => m.patientId === currentUser.nationalId).length}
+                        </span>
+                      </div>
                     </div>
 
-                    {/* Chat Messages Stream */}
-                    <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 flex flex-col-reverse bg-white">
+                    {/* Chat Messages Stream (WhatsApp Timeline Style) */}
+                    <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 flex flex-col-reverse bg-slate-50 border-y border-slate-200">
                       {/* Sort messages from newest to oldest since flex-col-reverse will render them correctly from bottom to top */}
                       {[...messages]
                         .filter(m => m.patientId === currentUser.nationalId)
                         .sort((a, b) => new Date(b.askedAt).getTime() - new Date(a.askedAt).getTime())
                         .map((msg) => (
-                          <div key={msg.id} className="space-y-4">
-                            {/* Patient Message (On Right) */}
-                            <div className="flex justify-end">
-                              <div className="max-w-[85%] md:max-w-[70%] space-y-1.5">
-                                <div className="bg-indigo-600 text-white rounded-3xl rounded-tr-none px-4 py-3 shadow-md border border-indigo-750">
-                                  <p className="text-xs md:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-justify">
-                                    {msg.question}
-                                  </p>
-
-                                  {/* Attached file (Patient) */}
-                                  {msg.patientFileName && msg.patientFileUrl && (
-                                    <div className="mt-2.5 flex items-center justify-between gap-3 bg-black/20 p-2 rounded-xl border border-white/10">
-                                      <div className="flex items-center gap-1.5 min-w-0">
-                                        <Paperclip className="w-3.5 h-3.5 text-indigo-300 shrink-0" />
-                                        <span className="text-[10px] text-slate-200 font-bold truncate max-w-[120px]">{msg.patientFileName}</span>
-                                      </div>
-                                      <a
-                                        href={msg.patientFileUrl}
-                                        download={msg.patientFileName}
-                                        className="bg-indigo-500 hover:bg-indigo-600 text-white text-[9px] px-2.5 py-1 rounded-lg font-black cursor-pointer transition-colors shrink-0"
-                                      >
-                                        دانلود فایل
-                                      </a>
+                          <React.Fragment key={msg.id}>
+                            {/* 2. Doctor Response (Rendered above in flex-col-reverse timeline if answered) */}
+                            {msg.answer && (
+                              <div className="flex justify-start my-1">
+                                <div className="max-w-[85%] md:max-w-[70%] space-y-1">
+                                  <div className="bg-white text-slate-800 rounded-2xl rounded-tl-none p-4 shadow-md border border-slate-200/80">
+                                    <div className="flex justify-between items-center text-[11px] text-indigo-600 font-black mb-1.5 pb-1 border-b border-slate-100">
+                                      <span className="flex items-center gap-1.5">
+                                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                                        <span>پاسخ {msg.answeredBy || 'کادر درمان بخش'}</span>
+                                      </span>
+                                      <span className="font-mono text-[9px] text-slate-400 font-normal">
+                                        {msg.answeredAt ? new Date(msg.answeredAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' }) : ''}
+                                      </span>
                                     </div>
-                                  )}
-                                </div>
-                                <div className="text-[9px] text-slate-400 font-mono text-left px-2">
-                                  {new Date(msg.askedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Doctor Response (On Left) */}
-                            {msg.answer ? (
-                              <div className="flex justify-start">
-                                <div className="max-w-[85%] md:max-w-[70%] space-y-1.5">
-                                  <div className="bg-slate-100 text-slate-800 rounded-3xl rounded-tl-none px-4 py-3 shadow-sm border border-slate-200">
-                                    <div className="text-[10px] text-indigo-600 font-black mb-1">
-                                      {msg.answeredBy || 'کادر درمان'}
-                                    </div>
-                                    <p className="text-xs md:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-justify">
+                                    <p className="text-xs md:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-slate-800 text-justify">
                                       {msg.answer}
                                     </p>
 
                                     {/* Attached file (Admin) */}
                                     {msg.adminFileName && msg.adminFileUrl && (
-                                      <div className="mt-2.5 flex items-center justify-between gap-3 bg-slate-200 p-2 rounded-xl border border-slate-300">
+                                      <div className="mt-2.5 flex items-center justify-between gap-3 bg-indigo-50/70 p-2 rounded-xl border border-indigo-100">
                                         <div className="flex items-center gap-1.5 min-w-0">
                                           <Paperclip className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                                          <span className="text-[10px] text-slate-700 font-bold truncate max-w-[120px]">{msg.adminFileName}</span>
+                                          <span className="text-[10px] text-slate-700 font-bold truncate max-w-[130px]">{msg.adminFileName}</span>
                                         </div>
                                         <a
                                           href={msg.adminFileUrl}
@@ -4722,13 +4839,44 @@ export default function App() {
                                       </div>
                                     )}
                                   </div>
-                                  <div className="text-[9px] text-slate-400 font-mono text-right px-2">
-                                    {msg.answeredAt ? new Date(msg.answeredAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' }) : ''}
-                                  </div>
                                 </div>
                               </div>
-                            ) : null}
-                          </div>
+                            )}
+
+                            {/* 1. Patient Message (On Right) */}
+                            <div className="flex justify-end my-1">
+                              <div className="max-w-[85%] md:max-w-[70%] space-y-1">
+                                <div className="bg-indigo-600 text-white rounded-2xl rounded-tr-none p-4 shadow-md border border-indigo-700">
+                                  <div className="flex justify-between items-center text-[10px] text-indigo-200 mb-1.5 font-bold pb-1 border-b border-indigo-500/30">
+                                    <span>پیام شما ({currentUser.name})</span>
+                                    <span className="font-mono text-[9px] text-indigo-200">
+                                      {new Date(msg.askedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}
+                                    </span>
+                                  </div>
+                                  <p className="text-xs md:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-justify">
+                                    {msg.question}
+                                  </p>
+
+                                  {/* Attached file (Patient) */}
+                                  {msg.patientFileName && msg.patientFileUrl && (
+                                    <div className="mt-2.5 flex items-center justify-between gap-3 bg-black/20 p-2 rounded-xl border border-white/10">
+                                      <div className="flex items-center gap-1.5 min-w-0">
+                                        <Paperclip className="w-3.5 h-3.5 text-indigo-200 shrink-0" />
+                                        <span className="text-[10px] text-slate-100 font-bold truncate max-w-[130px]">{msg.patientFileName}</span>
+                                      </div>
+                                      <a
+                                        href={msg.patientFileUrl}
+                                        download={msg.patientFileName}
+                                        className="bg-indigo-500 hover:bg-indigo-400 text-white text-[9px] px-2.5 py-1 rounded-lg font-black cursor-pointer transition-colors shrink-0"
+                                      >
+                                        دانلود فایل
+                                      </a>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </React.Fragment>
                         ))}
 
                       {messages.filter(m => m.patientId === currentUser.nationalId).length === 0 && (
@@ -5254,25 +5402,25 @@ export default function App() {
                   </div>
                 </div>
               ) : (
-                /* Inside a specific workstation page with complete dark, high-contrast, premium styling */
-                <div className="bg-slate-900/95 text-white border border-slate-700/50 rounded-2xl sm:rounded-[2.5rem] p-3 sm:p-8 shadow-2xl space-y-6 sm:space-y-8 relative overflow-x-hidden w-full max-w-full">
+                /* Inside a specific workstation page with a soft, non-white light medical slate background (#e8eff7) */
+                <div className="bg-[#e8eff7] text-slate-900 border border-slate-300 shadow-xl rounded-2xl sm:rounded-[2.5rem] p-3 sm:p-8 space-y-6 sm:space-y-8 relative overflow-x-hidden w-full max-w-full">
                   {/* Decorative backdrop container safely masked to card borders */}
                   <div className="absolute inset-0 rounded-[2.5rem] overflow-hidden pointer-events-none z-0">
-                    <div className="absolute top-0 right-0 w-64 h-64 bg-gradient-to-br from-indigo-500/5 via-sky-500/5 to-transparent rounded-full blur-3xl pointer-events-none" />
+                    <div className="absolute top-0 right-0 w-64 h-64 bg-gradient-to-br from-indigo-500/10 via-sky-500/10 to-transparent rounded-full blur-3xl pointer-events-none" />
                   </div>
 
                   {/* Beautiful top navigation header inside subpages */}
-                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-800 pb-5 relative z-10">
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-300/80 pb-5 relative z-10">
                     <button
                       onClick={() => setAdminTab('overview')}
-                      className="bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-slate-700/50 rounded-2xl px-5 py-2.5 text-xs font-black flex items-center gap-2 cursor-pointer transition-all duration-300 hover:scale-105 active:scale-95 shadow-lg shadow-black/10 shrink-0"
+                      className="bg-slate-900 hover:bg-slate-800 text-white border border-slate-700 rounded-2xl px-5 py-2.5 text-xs font-black flex items-center gap-2 cursor-pointer transition-all duration-300 hover:scale-105 active:scale-95 shadow-md shrink-0"
                     >
-                      <ArrowRight className="w-4 h-4" />
+                      <ArrowRight className="w-4 h-4 text-sky-400" />
                       <span>برگشت به منوی اصلی بخش‌ها</span>
                     </button>
                     <div className="text-right">
-                      <span className="text-[10px] text-sky-400 font-extrabold uppercase tracking-widest">سامانه یکپارچه مدیریت بیمارستان من</span>
-                      <h3 className="text-sm font-black text-slate-300 mt-1">
+                      <span className="text-[10px] text-sky-800 font-extrabold uppercase tracking-widest">سامانه یکپارچه مدیریت بیمارستان من</span>
+                      <h3 className="text-sm font-black text-slate-900 mt-1">
                         {currentAdmin.name} • {currentAdmin.role === 'super' ? 'مدیریت کل سیستم' : `بخش ${departments.find(d => d.id === currentAdmin.departmentId)?.name}`}
                       </h3>
                     </div>
@@ -5285,13 +5433,13 @@ export default function App() {
                     <div className="space-y-5 sm:space-y-8 w-full max-w-full overflow-hidden">
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 min-w-0">
                         <div className="min-w-0">
-                          <h3 className="text-base sm:text-xl font-black text-white mb-1 flex items-center gap-2">
-                            <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6 text-sky-400 animate-pulse shrink-0" />
+                          <h3 className="text-base sm:text-xl font-black text-slate-900 mb-1 flex items-center gap-2">
+                            <TrendingUp className="w-5 h-5 sm:w-6 sm:h-6 text-sky-600 animate-pulse shrink-0" />
                             <span className="truncate">
                               {currentAdmin?.role === 'super' ? 'داشبورد آماری و شاخص‌های بیمارستان' : `داشبورد آماری و شاخص‌های بخش ${departments.find(d => d.id === currentAdmin?.departmentId)?.name || ''}`}
                             </span>
                           </h3>
-                          <p className="text-xs text-slate-300 font-medium">
+                          <p className="text-xs text-slate-600 font-medium">
                             {currentAdmin?.role === 'super' ? 'آمار عملکردی، شاخص‌های ارزیابی و پیگیری بیماران ترخیصی به تفکیک ماه و سال' : 'آمار عملکردی، شاخص‌های ارزیابی و پیگیری بیماران ترخیصی بخش به تفکیک ماه و سال'}
                           </p>
                         </div>
@@ -5299,7 +5447,7 @@ export default function App() {
                           <button
                             type="button"
                             onClick={() => exportHospitalIndicatorsExcel(stats, currentAdmin, selectedStatsMonth, selectedStatsYear)}
-                            className="bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black flex items-center gap-2 shadow-lg shadow-emerald-600/20 transition-all cursor-pointer shrink-0 border border-emerald-400/30 active:scale-95"
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2.5 sm:py-2 rounded-xl text-xs font-black flex items-center gap-2 shadow-md transition-all cursor-pointer shrink-0 border border-emerald-500/30 active:scale-95"
                           >
                             <FileSpreadsheet className="w-4 h-4" />
                             <span>دانلود فایل اکسل شاخص‌ها</span>
@@ -5308,13 +5456,13 @@ export default function App() {
                       </div>
 
                       {/* STATS YEAR SELECTOR BAR (AUTOMATIC YEAR SWITCHING WITHOUT DELETING DATA) */}
-                      <div className="bg-slate-800/80 border border-slate-700/80 p-3 sm:p-4 rounded-2xl space-y-2.5">
+                      <div className="bg-slate-50 border border-slate-200 p-3 sm:p-4 rounded-2xl space-y-2.5 shadow-sm">
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                          <h4 className="text-xs sm:text-sm font-black text-slate-200 flex items-center gap-2">
-                            <History className="w-4 h-4 text-purple-400 shrink-0" />
+                          <h4 className="text-xs sm:text-sm font-black text-slate-800 flex items-center gap-2">
+                            <History className="w-4 h-4 text-purple-600 shrink-0" />
                             <span>انتخاب سال آماری شاخص‌ها (تعویض سال):</span>
                           </h4>
-                          <span className="text-[11px] text-slate-400">
+                          <span className="text-[11px] text-slate-500 font-bold">
                             در حال مشاهده آمار و شاخص‌های سال {selectedStatsYear} • بدون حذف بیماران
                           </span>
                         </div>
@@ -5330,11 +5478,11 @@ export default function App() {
                               }}
                               className={`px-4 py-2 rounded-xl text-xs font-black transition-all cursor-pointer border flex items-center gap-1.5 ${
                                 selectedStatsYear === year
-                                  ? 'bg-purple-600 text-white border-purple-400 shadow-md shadow-purple-600/30 ring-2 ring-purple-400/40'
-                                  : 'bg-slate-700/50 hover:bg-slate-700 text-slate-300 border-slate-600'
+                                  ? 'bg-purple-600 text-white border-purple-500 shadow-md shadow-purple-600/20 ring-2 ring-purple-400/40'
+                                  : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
                               }`}
                             >
-                              <Calendar className="w-3.5 h-3.5 text-purple-300" />
+                              <Calendar className="w-3.5 h-3.5 text-purple-500" />
                               <span>سال {year}</span>
                             </button>
                           ))}
@@ -5344,15 +5492,15 @@ export default function App() {
                       {/* MONTH SELECTION TILES BAR */}
                       <div className="space-y-3 min-w-0 w-full">
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 min-w-0">
-                          <h4 className="text-xs sm:text-sm font-black text-slate-200 flex items-center gap-2 min-w-0">
-                            <Calendar className="w-4 h-4 text-sky-400 shrink-0" />
+                          <h4 className="text-xs sm:text-sm font-black text-slate-800 flex items-center gap-2 min-w-0">
+                            <Calendar className="w-4 h-4 text-sky-600 shrink-0" />
                             <span className="truncate">{currentAdmin?.role === 'super' ? 'انتخاب ماه جهت دریافت شاخص‌های تفکیکی بیمارستان:' : 'انتخاب ماه جهت دریافت شاخص‌های تفکیکی بخش:'}</span>
                           </h4>
                           {selectedStatsMonth !== 'all' && (
                             <button
                               type="button"
                               onClick={() => setSelectedStatsMonth('all')}
-                              className="text-[11px] font-bold text-sky-400 hover:text-sky-300 bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 px-2.5 py-1 rounded-lg transition-all cursor-pointer shrink-0 self-start sm:self-auto"
+                              className="text-[11px] font-bold text-sky-700 hover:text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-200 px-2.5 py-1 rounded-lg transition-all cursor-pointer shrink-0 self-start sm:self-auto"
                             >
                               مشاهده کل سال
                             </button>
@@ -5370,17 +5518,17 @@ export default function App() {
                                 onClick={() => setSelectedStatsMonth(m.id)}
                                 className={`p-2 sm:p-3 rounded-xl sm:rounded-2xl border transition-all duration-200 cursor-pointer flex flex-col justify-between min-h-[68px] sm:min-h-[84px] relative overflow-hidden min-w-0 w-full ${
                                   isSelected
-                                    ? 'bg-gradient-to-br from-sky-500/25 via-blue-600/20 to-indigo-900/40 border-sky-400 shadow-lg shadow-sky-500/20 text-white ring-2 ring-sky-400/50 scale-[1.01]'
-                                    : 'bg-white/5 hover:bg-white/10 border-white/10 text-slate-300 hover:text-white hover:border-white/20'
+                                    ? 'bg-gradient-to-br from-sky-500 via-blue-600 to-indigo-600 border-sky-500 shadow-md text-white ring-2 ring-sky-400/50 scale-[1.01]'
+                                    : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700'
                                 }`}
                               >
                                 <div className="flex items-center justify-between gap-1 min-w-0">
                                   <span className="text-[11px] sm:text-xs font-black truncate">{m.name}</span>
-                                  <span className={`w-2 h-2 rounded-full shrink-0 ${isSelected ? 'bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.9)]' : count > 0 ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+                                  <span className={`w-2 h-2 rounded-full shrink-0 ${isSelected ? 'bg-white' : count > 0 ? 'bg-emerald-500' : 'bg-slate-300'}`} />
                                 </div>
                                 <div className="mt-1.5 flex items-baseline justify-between gap-1 min-w-0">
-                                  <span className="text-[9px] sm:text-[10px] text-slate-400 font-medium truncate">آمار:</span>
-                                  <span className={`text-[11px] sm:text-xs font-black font-mono ${isSelected ? 'text-sky-300' : 'text-slate-200'}`}>
+                                  <span className={`text-[9px] sm:text-[10px] font-medium truncate ${isSelected ? 'text-sky-100' : 'text-slate-500'}`}>آمار:</span>
+                                  <span className={`text-[11px] sm:text-xs font-black font-mono ${isSelected ? 'text-white' : 'text-slate-800'}`}>
                                     {count} نفر
                                   </span>
                                 </div>
@@ -5391,16 +5539,16 @@ export default function App() {
                       </div>
 
                       {/* CURRENT SELECTION BADGE HEADER */}
-                      <div className="bg-[#111625] border border-sky-500/30 p-3 sm:p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-md min-w-0 w-full">
+                      <div className="bg-sky-50 border border-sky-200 p-3 sm:p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-sm min-w-0 w-full">
                         <div className="flex items-center gap-2.5 min-w-0">
-                          <div className="p-2 bg-sky-500/10 text-sky-400 border border-sky-500/20 rounded-xl shrink-0">
+                          <div className="p-2 bg-sky-100 text-sky-700 border border-sky-200 rounded-xl shrink-0">
                             <Calendar className="w-4 h-4 sm:w-5 sm:h-5" />
                           </div>
                           <div className="min-w-0">
-                            <span className="text-xs font-black text-white block truncate">
+                            <span className="text-xs font-black text-slate-800 block truncate">
                               شاخص‌های فعال برای: {PERSIAN_MONTHS.find(m => m.id === selectedStatsMonth)?.name}
                             </span>
-                            <span className="text-[11px] text-slate-400 font-medium block truncate">
+                            <span className="text-[11px] text-slate-600 font-medium block truncate">
                               {selectedStatsMonth === 'all'
                                 ? 'نمایش شاخص‌های جامع و تجمع داده‌های کل سال بیمارستان'
                                 : `نمایش دقیق شاخص‌های قانونی وزارت بهداشت برای ماه ${PERSIAN_MONTHS.find(m => m.id === selectedStatsMonth)?.name}`
@@ -5408,149 +5556,149 @@ export default function App() {
                             </span>
                           </div>
                         </div>
-                        <span className="bg-sky-500/20 text-sky-300 border border-sky-400/30 px-3 py-1.5 rounded-xl text-xs font-black font-mono shrink-0 self-start sm:self-auto">
+                        <span className="bg-sky-600 text-white border border-sky-600 px-3 py-1.5 rounded-xl text-xs font-black font-mono shrink-0 self-start sm:self-auto shadow-sm">
                           {stats.totalCount} بیمار در این بازه
                         </span>
                       </div>
 
                       {/* STAT CARDS GRID */}
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-6">
-                        <div className="bg-white/5 border border-white/10 p-4 sm:p-5 rounded-2xl flex items-center gap-3.5 shadow-inner min-w-0">
-                          <div className="bg-sky-500/10 text-sky-300 p-3 rounded-xl border border-sky-400/20 shrink-0">
+                        <div className="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl flex items-center gap-3.5 shadow-sm min-w-0">
+                          <div className="bg-sky-100 text-sky-700 p-3 rounded-xl border border-sky-200 shrink-0">
                             <Users className="w-5 h-5 sm:w-6 sm:h-6" />
                           </div>
                           <div className="min-w-0">
-                            <span className="block text-[10px] text-slate-400 font-black uppercase tracking-wider truncate">
+                            <span className="block text-[10px] text-slate-500 font-black uppercase tracking-wider truncate">
                               کل بیماران ترخیص‌شده
                             </span>
-                            <span className="text-2xl sm:text-3xl font-black font-mono text-white mt-0.5 block">{stats.totalCount}</span>
+                            <span className="text-2xl sm:text-3xl font-black font-mono text-slate-900 mt-0.5 block">{stats.totalCount}</span>
                           </div>
                         </div>
 
-                        <div className="bg-white/5 border border-white/10 p-4 sm:p-5 rounded-2xl flex items-center gap-3.5 shadow-inner min-w-0">
-                          <div className="bg-emerald-500/10 text-emerald-300 p-3 rounded-xl border border-emerald-400/20 shrink-0">
+                        <div className="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl flex items-center gap-3.5 shadow-sm min-w-0">
+                          <div className="bg-emerald-100 text-emerald-700 p-3 rounded-xl border border-emerald-200 shrink-0">
                             <CheckCircle className="w-5 h-5 sm:w-6 sm:h-6" />
                           </div>
                           <div className="min-w-0">
-                            <span className="block text-[10px] text-slate-400 font-black uppercase tracking-wider truncate">پیگیری‌شده (پاسخ داده)</span>
-                            <span className="text-2xl sm:text-3xl font-black font-mono text-emerald-300 mt-0.5 block">{stats.evaluatedCount}</span>
+                            <span className="block text-[10px] text-slate-500 font-black uppercase tracking-wider truncate">پیگیری‌شده (پاسخ داده)</span>
+                            <span className="text-2xl sm:text-3xl font-black font-mono text-emerald-600 mt-0.5 block">{stats.evaluatedCount}</span>
                           </div>
                         </div>
 
-                        <div className="bg-white/5 border border-white/10 p-4 sm:p-5 rounded-2xl flex items-center gap-3.5 shadow-inner min-w-0">
-                          <div className="bg-amber-500/10 text-amber-300 p-3 rounded-xl border border-amber-400/20 shrink-0">
+                        <div className="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl flex items-center gap-3.5 shadow-sm min-w-0">
+                          <div className="bg-amber-100 text-amber-700 p-3 rounded-xl border border-amber-200 shrink-0">
                             <Clock className="w-5 h-5 sm:w-6 sm:h-6" />
                           </div>
                           <div className="min-w-0">
-                            <span className="block text-[10px] text-slate-400 font-black uppercase tracking-wider truncate">در انتظار پیگیری اول</span>
-                            <span className="text-2xl sm:text-3xl font-black font-mono text-amber-300 mt-0.5 block">{stats.totalCount - stats.evaluatedCount}</span>
+                            <span className="block text-[10px] text-slate-500 font-black uppercase tracking-wider truncate">در انتظار پیگیری اول</span>
+                            <span className="text-2xl sm:text-3xl font-black font-mono text-amber-600 mt-0.5 block">{stats.totalCount - stats.evaluatedCount}</span>
                           </div>
                         </div>
                       </div>
 
                       {/* TRIAGE STATUS SUMMARY CARDS */}
                       {stats.triageCounts && (
-                        <div className="bg-white/5 border border-white/10 p-4 sm:p-5 rounded-2xl space-y-3 shadow-inner">
-                          <h4 className="text-xs sm:text-sm font-black text-white flex items-center justify-between">
+                        <div className="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl space-y-3 shadow-sm">
+                          <h4 className="text-xs sm:text-sm font-black text-slate-900 flex items-center justify-between">
                             <span className="flex items-center gap-2">
-                              <AlertTriangle className="w-4 h-4 text-amber-400" />
+                              <AlertTriangle className="w-4 h-4 text-amber-600" />
                               <span>آمار تفکیکی وضعیت تریاژ بیماران (سطح قرمز، زرد و سبز):</span>
                             </span>
-                            <span className="text-[10px] text-slate-400 font-normal">
+                            <span className="text-[10px] text-slate-500 font-normal">
                               اطلاعات خروجی اکسل در شیت «آمار تریاژ بیماران» درج می‌گردد
                             </span>
                           </h4>
                           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <div className="bg-rose-500/10 border border-rose-500/30 p-3.5 rounded-xl flex items-center justify-between">
+                            <div className="bg-rose-50 border border-rose-200 p-3.5 rounded-xl flex items-center justify-between">
                               <div>
-                                <span className="block text-[11px] text-rose-300 font-black">سطح قرمز (کنترل‌نشده)</span>
-                                <span className="text-[10px] text-rose-200/70 font-medium">وضعیت هنوز کنترل نشده است</span>
+                                <span className="block text-[11px] text-rose-800 font-black">سطح قرمز (کنترل‌نشده)</span>
+                                <span className="text-[10px] text-rose-600 font-medium">وضعیت هنوز کنترل نشده است</span>
                               </div>
-                              <span className="text-2xl font-black font-mono text-rose-400">{stats.triageCounts.red} نفر</span>
+                              <span className="text-2xl font-black font-mono text-rose-600">{stats.triageCounts.red} نفر</span>
                             </div>
 
-                            <div className="bg-amber-500/10 border border-amber-500/30 p-3.5 rounded-xl flex items-center justify-between">
+                            <div className="bg-amber-50 border border-amber-200 p-3.5 rounded-xl flex items-center justify-between">
                               <div>
-                                <span className="block text-[11px] text-amber-300 font-black">سطح زرد (کنترل ناکافی)</span>
-                                <span className="text-[10px] text-amber-200/70 font-medium">وضعیت بصورت ناکافی کنترل شده</span>
+                                <span className="block text-[11px] text-amber-800 font-black">سطح زرد (کنترل ناکافی)</span>
+                                <span className="text-[10px] text-amber-600 font-medium">وضعیت بصورت ناکافی کنترل شده</span>
                               </div>
-                              <span className="text-2xl font-black font-mono text-amber-400">{stats.triageCounts.yellow} نفر</span>
+                              <span className="text-2xl font-black font-mono text-amber-600">{stats.triageCounts.yellow} نفر</span>
                             </div>
 
-                            <div className="bg-emerald-500/10 border border-emerald-500/30 p-3.5 rounded-xl flex items-center justify-between">
+                            <div className="bg-emerald-50 border border-emerald-200 p-3.5 rounded-xl flex items-center justify-between">
                               <div>
-                                <span className="block text-[11px] text-emerald-300 font-black">سطح سبز (محدوده ایمن)</span>
-                                <span className="text-[10px] text-emerald-200/70 font-medium">وضعیت کنترل و در محدوده ایمن</span>
+                                <span className="block text-[11px] text-emerald-800 font-black">سطح سبز (محدوده ایمن)</span>
+                                <span className="text-[10px] text-emerald-600 font-medium">وضعیت کنترل و در محدوده ایمن</span>
                               </div>
-                              <span className="text-2xl font-black font-mono text-emerald-400">{stats.triageCounts.green} نفر</span>
+                              <span className="text-2xl font-black font-mono text-emerald-600">{stats.triageCounts.green} نفر</span>
                             </div>
                           </div>
                         </div>
                       )}
 
                       {/* 4 OFFICIAL INDICATORS (Appendix 21) */}
-                      <div className="border-t border-white/10 pt-6 space-y-5">
-                        <h4 className="text-sm sm:text-base font-black text-white flex items-center gap-2">
-                          <FileSpreadsheet className="w-4 h-4 sm:w-5 sm:h-5 text-sky-400 shrink-0" />
+                      <div className="border-t border-slate-200 pt-6 space-y-5">
+                        <h4 className="text-sm sm:text-base font-black text-slate-900 flex items-center gap-2">
+                          <FileSpreadsheet className="w-4 h-4 sm:w-5 sm:h-5 text-sky-600 shrink-0" />
                           <span>شاخص‌های عملکردی واحد (دستورالعمل وزارت بهداشت - پیوست ۲۱):</span>
                         </h4>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 sm:gap-6">
 
                           {/* 1. Follow-up Success rate */}
-                          <div className="bg-white/5 border border-white/10 p-4 sm:p-5 rounded-2xl space-y-2.5 shadow-md min-w-0">
+                          <div className="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl space-y-2.5 shadow-sm min-w-0">
                             <div className="flex justify-between items-center text-xs">
-                              <span className="font-black text-slate-200">۱. درصد بیماران پیگیری‌شده توسط واحد:</span>
-                              <span className="font-black font-mono text-sky-400 text-sm">{stats.followupRate}%</span>
+                              <span className="font-black text-slate-800">۱. درصد بیماران پیگیری‌شده توسط واحد:</span>
+                              <span className="font-black font-mono text-sky-600 text-sm">{stats.followupRate}%</span>
                             </div>
-                            <div className="w-full bg-slate-900/50 h-2.5 rounded-full overflow-hidden border border-white/5 p-[1px]">
-                              <div className="bg-gradient-to-r from-sky-500 to-blue-500 h-full rounded-full shadow-[0_0_8px_rgba(56,189,248,0.5)] transition-all duration-500" style={{ width: `${stats.followupRate}%` }} />
+                            <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden border border-slate-300 p-[1px]">
+                              <div className="bg-gradient-to-r from-sky-500 to-blue-600 h-full rounded-full transition-all duration-500" style={{ width: `${stats.followupRate}%` }} />
                             </div>
-                            <p className="text-[10px] text-slate-400 font-medium">فرمول: (بیماران دارای خودارزیابی / کل بیماران ترخیصی) × ۱۰۰</p>
+                            <p className="text-[10px] text-slate-500 font-medium">فرمول: (بیماران دارای خودارزیابی / کل بیماران ترخیصی) × ۱۰۰</p>
                           </div>
 
                           {/* 2. Patient satisfaction rate (Derived from Q18) */}
-                          <div className="bg-white/5 border border-white/10 p-4 sm:p-5 rounded-2xl space-y-2.5 shadow-md min-w-0">
+                          <div className="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl space-y-2.5 shadow-sm min-w-0">
                             <div className="flex justify-between items-center text-xs">
-                              <span className="font-black text-slate-200">۲. درصد رضایتمندی بیماران ترخیصی از واحد (سوال ۱۸):</span>
-                              <span className="font-black font-mono text-emerald-400 text-sm">{stats.satisfactionRate}%</span>
+                              <span className="font-black text-slate-800">۲. درصد رضایتمندی بیماران ترخیصی از واحد (سوال ۱۸):</span>
+                              <span className="font-black font-mono text-emerald-600 text-sm">{stats.satisfactionRate}%</span>
                             </div>
-                            <div className="w-full bg-slate-900/50 h-2.5 rounded-full overflow-hidden border border-white/5 p-[1px]">
-                              <div className="bg-gradient-to-r from-emerald-500 to-teal-500 h-full rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)] transition-all duration-500" style={{ width: `${stats.satisfactionRate}%` }} />
+                            <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden border border-slate-300 p-[1px]">
+                              <div className="bg-gradient-to-r from-emerald-500 to-teal-600 h-full rounded-full transition-all duration-500" style={{ width: `${stats.satisfactionRate}%` }} />
                             </div>
-                            <p className="text-[10px] text-slate-400 font-medium">فرمول: (بیماران با پاسخ «عالی» یا «خوب» در سوال ۱۸ رضایتمندی / کل ارزیابی‌شدگان) × ۱۰۰</p>
+                            <p className="text-[10px] text-slate-500 font-medium">فرمول: (بیماران با پاسخ «عالی» یا «خوب» در سوال ۱۸ رضایتمندی / کل ارزیابی‌شدگان) × ۱۰۰</p>
                           </div>
 
                           {/* 3. Readmission rate */}
-                          <div className="bg-white/5 border border-white/10 p-4 sm:p-5 rounded-2xl space-y-2.5 shadow-md min-w-0">
+                          <div className="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl space-y-2.5 shadow-sm min-w-0">
                             <div className="flex justify-between items-center text-xs">
-                              <span className="font-black text-slate-200">۳. درصد بستری مجدد مرتبط با بیماری (در بازه یک‌ماهه):</span>
-                              <span className="font-black font-mono text-rose-400 text-sm">{stats.readmissionRate}%</span>
+                              <span className="font-black text-slate-800">۳. درصد بستری مجدد مرتبط با بیماری (در بازه یک‌ماهه):</span>
+                              <span className="font-black font-mono text-rose-600 text-sm">{stats.readmissionRate}%</span>
                             </div>
-                            <div className="w-full bg-slate-900/50 h-2.5 rounded-full overflow-hidden border border-white/5 p-[1px]">
-                              <div className="bg-gradient-to-r from-rose-500 to-red-500 h-full rounded-full shadow-[0_0_8px_rgba(244,63,94,0.5)] transition-all duration-500" style={{ width: `${stats.readmissionRate}%` }} />
+                            <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden border border-slate-300 p-[1px]">
+                              <div className="bg-gradient-to-r from-rose-500 to-red-600 h-full rounded-full transition-all duration-500" style={{ width: `${stats.readmissionRate}%` }} />
                             </div>
-                            <p className="text-[10px] text-slate-400 font-medium">فرمول: (بیماران بستری مجدد / کل بیماران پیگیری‌شده) × ۱۰۰</p>
+                            <p className="text-[10px] text-slate-500 font-medium">فرمول: (بیماران بستری مجدد / کل بیماران پیگیری‌شده) × ۱۰۰</p>
                           </div>
 
                           {/* 4. Postpartum & Women's special follow-up indicator */}
-                          <div className="bg-white/5 border border-white/10 p-4 sm:p-5 rounded-2xl space-y-3 shadow-md min-w-0 col-span-1 md:col-span-1">
+                          <div className="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl space-y-3 shadow-sm min-w-0 col-span-1 md:col-span-1">
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                              <span className="font-black text-slate-200">۴. درصد پیگیری ویژه و غربالگری مادران باردار و پرخطر:</span>
+                              <span className="font-black text-slate-800">۴. درصد پیگیری ویژه و غربالگری مادران باردار و پرخطر:</span>
                               <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="bg-pink-500/10 text-pink-300 border border-pink-500/20 px-2 py-0.5 rounded-lg text-[10px] sm:text-[11px] font-bold">
+                                <span className="bg-pink-100 text-pink-700 border border-pink-200 px-2 py-0.5 rounded-lg text-[10px] sm:text-[11px] font-bold">
                                   بارداران: {stats.totalPregnantCount} نفر
                                 </span>
-                                <span className="bg-rose-500/10 text-rose-300 border border-rose-500/20 px-2 py-0.5 rounded-lg text-[10px] sm:text-[11px] font-bold">
+                                <span className="bg-rose-100 text-rose-700 border border-rose-200 px-2 py-0.5 rounded-lg text-[10px] sm:text-[11px] font-bold">
                                   پرخطر: {stats.highRiskPregnantCount} نفر
                                 </span>
-                                <span className="font-black font-mono text-indigo-400 text-sm">{stats.screeningRate}%</span>
+                                <span className="font-black font-mono text-indigo-600 text-sm">{stats.screeningRate}%</span>
                               </div>
                             </div>
-                            <div className="w-full bg-slate-900/50 h-2.5 rounded-full overflow-hidden border border-white/5 p-[1px]">
-                              <div className="bg-gradient-to-r from-pink-500 via-indigo-500 to-purple-500 h-full rounded-full shadow-[0_0_8px_rgba(99,102,241,0.5)] transition-all duration-500" style={{ width: `${stats.screeningRate}%` }} />
+                            <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden border border-slate-300 p-[1px]">
+                              <div className="bg-gradient-to-r from-pink-500 via-indigo-500 to-purple-600 h-full rounded-full transition-all duration-500" style={{ width: `${stats.screeningRate}%` }} />
                             </div>
-                            <p className="text-[10px] text-slate-400 font-medium">فرمول: (مادران باردار پرخطر شناسایی‌شده جهت پیگیری ویژه / کل بیماران باردار ثبت‌شده) × ۱۰۰</p>
+                            <p className="text-[10px] text-slate-500 font-medium">فرمول: (مادران باردار پرخطر شناسایی‌شده جهت پیگیری ویژه / کل بیماران باردار ثبت‌شده) × ۱۰۰</p>
                           </div>
 
                         </div>
@@ -5641,13 +5789,13 @@ export default function App() {
                         </div>
 
                         {/* Chart Container Card */}
-                        <div className="bg-[#111625] border border-white/10 p-3 sm:p-6 rounded-3xl space-y-4 shadow-xl relative overflow-hidden min-w-0 max-w-full">
+                        <div className="bg-white border border-slate-200/90 p-3 sm:p-6 rounded-3xl space-y-4 shadow-sm relative overflow-hidden min-w-0 max-w-full text-slate-800">
 
                           {/* Chart Title & Explanation Header */}
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-white/10 pb-3">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
                             <div className="flex items-center gap-2">
-                              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
-                              <span className="text-xs font-black text-slate-200">
+                              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping shrink-0" />
+                              <span className="text-xs font-black text-slate-900">
                                 {selectedChartMode === 'all' && 'نمودار پلکانی مقایسه‌ای ۴ شاخص اصلی بیمارستان'}
                                 {selectedChartMode === 'followup' && 'نمودار پلکانی ۱. درصد پیگیری بیمار (ماهانه)'}
                                 {selectedChartMode === 'satisfaction' && 'نمودار پلکانی ۲. درصد رضایتمندی ترخیصی - سوال ۱۸ (ماهانه)'}
@@ -5656,7 +5804,7 @@ export default function App() {
                                 {selectedChartMode === 'volume' && 'نمودار میله‌ای حجم پذیرش و ارزیابی بیماران در هر ماه'}
                               </span>
                             </div>
-                            <span className="text-[10px] text-slate-400 font-bold bg-white/5 px-2.5 py-1 rounded-lg border border-white/5 self-start sm:self-auto">
+                            <span className="text-[10px] text-slate-600 font-bold bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200 self-start sm:self-auto">
                               نوع نمودار: {selectedChartMode === 'volume' ? 'میله‌ای (Bar Chart)' : 'پلکانی (Step-After Line Chart)'}
                             </span>
                           </div>
@@ -5735,34 +5883,34 @@ export default function App() {
                           </div>
 
                           {/* MONTHLY COMPARISON DATA TABLE */}
-                          <div className="pt-4 border-t border-white/10 space-y-3 min-w-0 max-w-full">
-                            <h5 className="text-xs font-black text-slate-300 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                          <div className="pt-4 border-t border-slate-200 space-y-3 min-w-0 max-w-full">
+                            <h5 className="text-xs font-black text-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-1">
                               <span>جدول داده‌های مقایسه‌ای ماهانه (فروردین تا اسفند):</span>
-                              <span className="text-[10px] text-slate-400 font-normal">تمام اعداد به درصد هستند</span>
+                              <span className="text-[10px] text-slate-500 font-normal">تمام اعداد به درصد هستند</span>
                             </h5>
-                            <div className="overflow-x-auto max-w-full rounded-2xl border border-white/10 scrollbar-thin">
+                            <div className="overflow-x-auto max-w-full rounded-2xl border border-slate-200 scrollbar-thin">
                               <table className="w-full text-right text-[11px] min-w-[500px]">
-                                <thead className="bg-slate-950/80 text-slate-300 border-b border-white/10 font-bold">
+                                <thead className="bg-slate-100 text-slate-700 border-b border-slate-200 font-bold">
                                   <tr>
                                     <th className="p-2.5">ماه</th>
                                     <th className="p-2.5">کل بیمار</th>
                                     <th className="p-2.5">ارزیابی‌شده</th>
-                                    <th className="p-2.5 text-sky-400">۱. % پیگیری</th>
-                                    <th className="p-2.5 text-emerald-400">۲. % رضایت (Q18)</th>
-                                    <th className="p-2.5 text-rose-400">۳. % بستری مجدد</th>
-                                    <th className="p-2.5 text-purple-400">۴. % بارداران</th>
+                                    <th className="p-2.5 text-sky-700">۱. % پیگیری</th>
+                                    <th className="p-2.5 text-emerald-700">۲. % رضایت (Q18)</th>
+                                    <th className="p-2.5 text-rose-700">۳. % بستری مجدد</th>
+                                    <th className="p-2.5 text-purple-700">۴. % بارداران</th>
                                   </tr>
                                 </thead>
-                                <tbody className="divide-y divide-white/5 font-mono">
+                                <tbody className="divide-y divide-slate-200 font-mono">
                                   {stats.monthlyIndicatorsSeries.map((m) => (
-                                    <tr key={m.monthId} className="hover:bg-white/5 transition-colors">
-                                      <td className="p-2.5 font-sans font-bold text-slate-200">{m.monthName}</td>
-                                      <td className="p-2.5 text-slate-300">{m.totalCount}</td>
-                                      <td className="p-2.5 text-slate-300">{m.evaluatedCount}</td>
-                                      <td className="p-2.5 font-black text-sky-400">{m.followupRate}%</td>
-                                      <td className="p-2.5 font-black text-emerald-400">{m.satisfactionRate}%</td>
-                                      <td className="p-2.5 font-black text-rose-400">{m.readmissionRate}%</td>
-                                      <td className="p-2.5 font-black text-purple-400">{m.screeningRate}%</td>
+                                    <tr key={m.monthId} className="hover:bg-slate-100/60 transition-colors">
+                                      <td className="p-2.5 font-sans font-bold text-slate-800">{m.monthName}</td>
+                                      <td className="p-2.5 text-slate-700">{m.totalCount}</td>
+                                      <td className="p-2.5 text-slate-700">{m.evaluatedCount}</td>
+                                      <td className="p-2.5 font-black text-sky-600">{m.followupRate}%</td>
+                                      <td className="p-2.5 font-black text-emerald-600">{m.satisfactionRate}%</td>
+                                      <td className="p-2.5 font-black text-rose-600">{m.readmissionRate}%</td>
+                                      <td className="p-2.5 font-black text-purple-600">{m.screeningRate}%</td>
                                     </tr>
                                   ))}
                                 </tbody>
@@ -5774,18 +5922,18 @@ export default function App() {
                       </div>
 
                       {/* SPECIAL DISEASES TALLY SECTION */}
-                      <div className="border-t border-white/10 pt-6 sm:pt-8 space-y-4">
+                      <div className="border-t border-slate-200 pt-6 sm:pt-8 space-y-4">
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                           <div>
-                            <h4 className="text-sm sm:text-base font-black text-white flex items-center gap-2">
-                              <FlaskConical className="w-4 h-4 sm:w-5 sm:h-5 text-sky-400 shrink-0" />
+                            <h4 className="text-sm sm:text-base font-black text-slate-900 flex items-center gap-2">
+                              <FlaskConical className="w-4 h-4 sm:w-5 sm:h-5 text-sky-600 shrink-0" />
                               <span>آمار بیماران و بستری مجدد به تفکیک بیماری‌های ویژه:</span>
                             </h4>
-                            <p className="text-xs text-slate-400 mt-0.5">
+                            <p className="text-xs text-slate-600 mt-0.5">
                               تعداد بیماران ثبت‌شده و تعداد بستری مجدد در هر یک از ۱۷ گروه بیماری‌های ویژه بیمارستان
                             </p>
                           </div>
-                          <span className="bg-sky-500/10 text-sky-300 border border-sky-500/20 px-3 py-1 rounded-xl text-xs font-bold self-start sm:self-auto font-mono shrink-0">
+                          <span className="bg-sky-50 text-sky-700 border border-sky-200 px-3 py-1 rounded-xl text-xs font-bold self-start sm:self-auto font-mono shrink-0">
                             مجموع کل: {stats.totalActivePatientsCount} نفر
                           </span>
                         </div>
@@ -5794,11 +5942,11 @@ export default function App() {
                           {stats.specialDiseaseCounts.map((item) => (
                             <div
                               key={item.diseaseName}
-                              className="bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl p-2.5 sm:p-3.5 flex items-center justify-between gap-2 transition-all duration-200 min-w-0"
+                              className="bg-slate-50 hover:bg-slate-100/80 border border-slate-200 rounded-2xl p-2.5 sm:p-3.5 flex items-center justify-between gap-2 transition-all duration-200 min-w-0 shadow-sm"
                             >
                               <div className="flex items-center gap-2 min-w-0">
-                                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${item.count > 0 ? 'bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.8)]' : 'bg-slate-600'}`} />
-                                <span className="text-xs font-bold text-slate-200 truncate" title={item.diseaseName}>{item.diseaseName}</span>
+                                <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${item.count > 0 ? 'bg-sky-500' : 'bg-slate-300'}`} />
+                                <span className="text-xs font-bold text-slate-800 truncate" title={item.diseaseName}>{item.diseaseName}</span>
                               </div>
                               <div className="flex items-center gap-1.5 shrink-0">
                                 <span className={`px-2 py-0.5 rounded-xl text-xs font-black font-mono ${item.count > 0 ? 'bg-sky-500/20 text-sky-300 border border-sky-400/30' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}>
@@ -5818,48 +5966,48 @@ export default function App() {
 
                       {/* DEPARTMENT INDICATORS TILE SECTION (شاخص‌های بیمارستان به تفکیک بخش‌ها - فقط برای مدیریت کل) */}
                       {currentAdmin?.role === 'super' && (
-                        <div className="border-t border-white/10 pt-6 sm:pt-8 space-y-4">
+                        <div className="border-t border-slate-200 pt-6 sm:pt-8 space-y-4">
                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                             <div>
-                              <h4 className="text-sm sm:text-base font-black text-white flex items-center gap-2">
-                                <Building2 className="w-4 h-4 sm:w-5 sm:h-5 text-amber-400 shrink-0" />
+                              <h4 className="text-sm sm:text-base font-black text-slate-900 flex items-center gap-2">
+                                <Building2 className="w-4 h-4 sm:w-5 sm:h-5 text-amber-600 shrink-0" />
                                 <span>شاخص‌های بیمارستان به تفکیک بخش‌ها:</span>
                               </h4>
-                              <p className="text-xs text-slate-400 mt-0.5">
+                              <p className="text-xs text-slate-600 mt-0.5">
                                 تحلیل و مقایسه تفکیکی عملکرد و ۴ شاخص اصلی ارزیابی بیماران در کلیه بخش‌های بستری و تخصصی بیمارستان
                               </p>
                             </div>
-                            <span className="bg-amber-500/10 text-amber-300 border border-amber-500/20 px-3 py-1 rounded-xl text-xs font-bold self-start sm:self-auto font-mono shrink-0">
+                            <span className="bg-amber-50 text-amber-800 border border-amber-200 px-3 py-1 rounded-xl text-xs font-bold self-start sm:self-auto font-mono shrink-0">
                               تعداد بخش‌ها: {departments.length} بخش
                             </span>
                           </div>
 
-                          <div className="overflow-x-auto rounded-2xl border border-white/10 bg-[#111625] shadow-xl">
+                          <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm">
                             <table className="w-full text-right text-xs min-w-[650px]">
-                              <thead className="bg-slate-900/90 text-slate-300 border-b border-white/10 font-bold">
+                              <thead className="bg-slate-100 text-slate-800 border-b border-slate-200 font-bold">
                                 <tr>
                                   <th className="py-3 px-4">نام بخش بیمارستان</th>
                                   <th className="py-3 px-4">کل بیماران ترخیصی</th>
                                   <th className="py-3 px-4">ارزیابی‌شده (پاسخ‌داده)</th>
-                                  <th className="py-3 px-4 text-sky-400">۱. % پیگیری</th>
-                                  <th className="py-3 px-4 text-emerald-400">۲. % رضایت (Q18)</th>
-                                  <th className="py-3 px-4 text-rose-400">۳. % بستری مجدد</th>
-                                  <th className="py-3 px-4 text-purple-400">۴. % پیگیری ویژه</th>
+                                  <th className="py-3 px-4 text-sky-700">۱. % پیگیری</th>
+                                  <th className="py-3 px-4 text-emerald-700">۲. % رضایت (Q18)</th>
+                                  <th className="py-3 px-4 text-rose-700">۳. % بستری مجدد</th>
+                                  <th className="py-3 px-4 text-purple-700">۴. % پیگیری ویژه</th>
                                 </tr>
                               </thead>
-                              <tbody className="divide-y divide-white/5 font-mono">
+                              <tbody className="divide-y divide-slate-100 font-mono">
                                 {stats.departmentIndicatorsSeries.map((d) => (
-                                  <tr key={d.departmentId} className="hover:bg-white/5 transition-colors">
-                                    <td className="py-3.5 px-4 font-sans font-black text-white flex items-center gap-2">
-                                      <span className="w-2 h-2 rounded-full bg-amber-400" />
+                                  <tr key={d.departmentId} className="hover:bg-slate-50 transition-colors">
+                                    <td className="py-3.5 px-4 font-sans font-black text-slate-900 flex items-center gap-2">
+                                      <span className="w-2 h-2 rounded-full bg-amber-500" />
                                       <span>{d.departmentName}</span>
                                     </td>
-                                    <td className="py-3.5 px-4 font-bold text-slate-200">{d.totalCount} نفر</td>
-                                    <td className="py-3.5 px-4 font-bold text-slate-300">{d.evaluatedCount} نفر</td>
-                                    <td className="py-3.5 px-4 font-black text-sky-400">{d.followupRate}%</td>
-                                    <td className="py-3.5 px-4 font-black text-emerald-400">{d.satisfactionRate}%</td>
-                                    <td className="py-3.5 px-4 font-black text-rose-400">{d.readmissionRate}%</td>
-                                    <td className="py-3.5 px-4 font-black text-purple-400">{d.screeningRate}%</td>
+                                    <td className="py-3.5 px-4 font-bold text-slate-700">{d.totalCount} نفر</td>
+                                    <td className="py-3.5 px-4 font-bold text-slate-700">{d.evaluatedCount} نفر</td>
+                                    <td className="py-3.5 px-4 font-black text-sky-600">{d.followupRate}%</td>
+                                    <td className="py-3.5 px-4 font-black text-emerald-600">{d.satisfactionRate}%</td>
+                                    <td className="py-3.5 px-4 font-black text-rose-600">{d.readmissionRate}%</td>
+                                    <td className="py-3.5 px-4 font-black text-purple-600">{d.screeningRate}%</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -6269,7 +6417,7 @@ export default function App() {
                                           {surveyedPatients.filter(p => p.satisfactionSurvey?.q19.trim()).map(p => (
                                             <div key={p.nationalId} className="bg-white/5 border border-white/10 p-4.5 rounded-2xl space-y-2.5 text-right hover:border-emerald-500/30 transition-all">
                                               <div className="flex justify-between items-center text-xs font-bold border-b border-white/5 pb-2">
-                                                <span className="text-white font-black">{p.name} (پرونده: {p.fileNumber})</span>
+                                                <span className="text-white font-black">{p.name || ('بیمار کد ' + (p.userCode || p.nationalId))} (پرونده: {p.fileNumber})</span>
                                                 <span className="text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 rounded-lg text-[10px]">
                                                   بخش {departments.find(d => d.id === p.departmentId)?.name || 'نامشخص'}
                                                 </span>
@@ -6311,7 +6459,7 @@ export default function App() {
                                           {surveyedPatients.filter(p => p.satisfactionSurvey?.q20.trim()).map(p => (
                                             <div key={p.nationalId} className="bg-white/5 border border-white/10 p-4.5 rounded-2xl space-y-2.5 text-right hover:border-amber-500/30 transition-all">
                                               <div className="flex justify-between items-center text-xs font-bold border-b border-white/5 pb-2">
-                                                <span className="text-white font-black">{p.name} (پرونده: {p.fileNumber})</span>
+                                                <span className="text-white font-black">{p.name || ('بیمار کد ' + (p.userCode || p.nationalId))} (پرونده: {p.fileNumber})</span>
                                                 <span className="text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2.5 py-0.5 rounded-lg text-[10px]">
                                                   بخش {departments.find(d => d.id === p.departmentId)?.name || 'نامشخص'}
                                                 </span>
@@ -6345,168 +6493,168 @@ export default function App() {
                   {adminTab === 'register' && (
                     <div>
                       <div className="mb-6">
-                        <h3 className="text-xl font-black text-white mb-1.5 flex items-center gap-2">
-                          <Plus className="w-6 h-6 text-sky-400 animate-pulse" />
+                        <h3 className="text-xl font-black text-slate-900 mb-1.5 flex items-center gap-2">
+                          <Plus className="w-6 h-6 text-sky-600 animate-pulse" />
                           <span>ثبت و ترخیص بیمار جدید در سامانه پیگیری</span>
                         </h3>
-                        <p className="text-xs text-slate-300 font-medium">مشخصات بیمار را جهت اعطای دسترسی به کارتابل پیگیری وارد نمایید.</p>
+                        <p className="text-xs text-slate-600 font-medium">مشخصات بیمار را جهت اعطای دسترسی به کارتابل پیگیری وارد نمایید.</p>
                       </div>
 
                       <form onSubmit={handleRegisterPatient} className="space-y-5 max-w-2xl">
                         {regSuccessMsg && (
-                          <div className="bg-emerald-950/30 border border-emerald-500/30 text-emerald-200 text-xs font-black p-4 rounded-xl">
+                          <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-black p-4 rounded-xl shadow-sm">
                             {regSuccessMsg}
                           </div>
                         )}
                         {regErrorMsg && (
-                          <div className="bg-rose-950/30 border border-rose-500/30 text-rose-200 text-xs font-black p-4 rounded-xl">
+                          <div className="bg-rose-50 border border-rose-200 text-rose-800 text-xs font-black p-4 rounded-xl shadow-sm">
                             {regErrorMsg}
                           </div>
                         )}
 
                         <div className="grid sm:grid-cols-2 gap-4">
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">کد ملی بیمار:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">کد ملی بیمار (الزامی):</label>
                             <input
                               type="text"
                               placeholder="کد ملی ده رقمی"
                               value={regNationalId}
                               onChange={(e) => setRegNationalId(e.target.value)}
-                              className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                              className="w-full text-xs bg-slate-50 border border-slate-200 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">کد کاربری جهت ورود بیمار (اختیاری):</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">کد کاربری جهت ورود بیمار (الزامی):</label>
                             <input
                               type="text"
-                              placeholder="در صورت خالی بودن، کد ملی قرار می‌گیرد"
+                              placeholder="کد کاربری ورود بیمار"
                               value={regUserCode}
                               onChange={(e) => setRegUserCode(e.target.value)}
-                              className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold font-mono"
+                              className="w-full text-xs bg-slate-50 border border-slate-200 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold font-mono"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">رمز ورود بیمار به سامانه (اختیاری):</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">رمز ورود بیمار به سامانه (الزامی):</label>
                             <input
                               type="text"
-                              placeholder="در صورت خالی بودن، کد ملی قرار می‌گیرد"
+                              placeholder="رمز ورود بیمار"
                               value={regPassword}
                               onChange={(e) => setRegPassword(e.target.value)}
-                              className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold font-mono"
+                              className="w-full text-xs bg-slate-50 border border-slate-200 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold font-mono"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">شماره پرونده بیمارستانی:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">شماره پرونده بیمارستانی:</label>
                             <input
                               type="text"
                               placeholder="مثال: ۹۹۰۱۲۳"
                               value={regFileNumber}
                               onChange={(e) => setRegFileNumber(e.target.value)}
-                              className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                              className="w-full text-xs bg-slate-50 border border-slate-200 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">نام و نام خانوادگی بیمار:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">نام و نام خانوادگی بیمار:</label>
                             <input
                               type="text"
                               placeholder="مثال: محمد احمدی"
                               value={regName}
                               onChange={(e) => setRegName(e.target.value)}
-                              className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                              className="w-full text-xs bg-slate-50 border border-slate-200 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">سن بیمار:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">سن بیمار:</label>
                             <input
                               type="number"
                               placeholder="مثال: ۵۸"
                               value={regAge}
                               onChange={(e) => setRegAge(e.target.value)}
-                              className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                              className="w-full text-xs bg-slate-50 border border-slate-200 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">شماره تماس بیمار:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">شماره تماس بیمار:</label>
                             <input
                               type="text"
                               placeholder="مثال: ۰۹۱۲..."
                               value={regPhone}
                               onChange={(e) => setRegPhone(e.target.value)}
-                              className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                              className="w-full text-xs bg-slate-50 border border-slate-200 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">تاریخ بستری (هجری شمسی):</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">تاریخ بستری (هجری شمسی):</label>
                             <ShamsiDatePicker
                               value={regAdmissionDate}
                               onChange={(val) => setRegAdmissionDate(val)}
                               placeholder="انتخاب تاریخ بستری..."
-                              isDark={true}
+                              isDark={false}
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">بیماری ترخیص شده (تایپ کنید):</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">بیماری ترخیص شده (تایپ کنید):</label>
                             <input
                               type="text"
                               placeholder="مثال: دیابت، نارسایی قلبی، تالاسمی"
                               value={regDiseaseName}
                               onChange={(e) => setRegDiseaseName(e.target.value)}
-                              className="w-full text-xs bg-[#111625] border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                              className="w-full text-xs bg-slate-50 border border-slate-200 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">بخش بیمارستان:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">بخش بیمارستان:</label>
                             <select
                               value={currentAdmin?.role === 'super' ? regDeptId : currentAdmin?.departmentId}
                               onChange={(e) => setRegDeptId(e.target.value)}
                               disabled={currentAdmin?.role !== 'super'}
-                              className="w-full text-xs bg-[#111625] border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                              className="w-full text-xs bg-slate-50 border border-slate-200 text-slate-800 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                              <option value="" className="bg-[#111625] text-slate-400">-- انتخاب بخش --</option>
+                              <option value="" className="bg-white text-slate-400">-- انتخاب بخش --</option>
                               {departments
                                 .filter(d => currentAdmin?.role === 'super' ? true : d.id === currentAdmin?.departmentId)
                                 .map(d => (
-                                  <option key={d.id} value={d.id} className="bg-[#111625] text-white font-bold">{d.name}</option>
+                                  <option key={d.id} value={d.id} className="bg-white text-slate-800 font-bold">{d.name}</option>
                                 ))}
                             </select>
                           </div>
 
-                          <div className="sm:col-span-2 bg-[#111625]/60 border border-sky-500/30 p-4 rounded-2xl space-y-2.5">
-                            <label className="block text-xs font-bold text-sky-300 flex items-center gap-2">
-                              <FlaskConical className="w-4 h-4 text-sky-400" />
+                          <div className="sm:col-span-2 bg-sky-50/60 border border-sky-200 p-4 rounded-2xl space-y-2.5">
+                            <label className="block text-xs font-bold text-sky-900 flex items-center gap-2">
+                              <FlaskConical className="w-4 h-4 text-sky-600" />
                               <span>دسته‌بندی بیماری‌های ویژه (جهت شاخص‌گیری بیمارستان):</span>
                             </label>
                             <select
                               value={regSpecialDisease}
                               onChange={(e) => setRegSpecialDisease(e.target.value)}
-                              className="w-full text-xs bg-[#111625] border border-sky-500/40 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/50 font-bold cursor-pointer"
+                              className="w-full text-xs bg-white border border-sky-300 text-slate-800 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/50 font-bold cursor-pointer"
                             >
                               {SPECIAL_DISEASES.map(d => (
-                                <option key={d} value={d} className="bg-[#111625] text-white font-bold">{d}</option>
+                                <option key={d} value={d} className="bg-white text-slate-800 font-bold">{d}</option>
                               ))}
                             </select>
-                            <p className="text-[10px] text-slate-400 font-medium leading-relaxed">
+                            <p className="text-[10px] text-slate-600 font-medium leading-relaxed">
                               * در صورتی که بیمار جزو لیست بیماری‌های ویژه بیمارستان باشد آن را انتخاب کنید؛ در غیر این صورت گزینه «سایر بیماران» انتخاب شده می‌ماند. این انتخاب صرفاً جهت استخراج شاخص‌های بیمارستانی است و در پنل بیمار نمایش داده نمی‌شود.
                             </p>
                           </div>
 
                           {/* TRIAGE LEVEL INITIAL SELECTION */}
-                          <div className="sm:col-span-2 bg-[#111625]/80 border border-emerald-500/30 p-4 rounded-2xl space-y-3">
-                            <label className="block text-xs font-bold text-emerald-300 flex items-center gap-2">
-                              <Activity className="w-4 h-4 text-emerald-400" />
+                          <div className="sm:col-span-2 bg-slate-50 border border-emerald-200 p-4 rounded-2xl space-y-3 shadow-sm">
+                            <label className="block text-xs font-bold text-emerald-900 flex items-center gap-2">
+                              <Activity className="w-4 h-4 text-emerald-600" />
                               <span>تعیین وضعیت تریاژ اولیه بیمار (سطح قرمز، زرد و سبز):</span>
                             </label>
                             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                              <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${regFollowupStatus === 'red' ? 'bg-rose-500/20 border-rose-500 text-rose-200' : 'bg-[#111625] border-white/10 text-slate-300 hover:bg-white/5'}`}>
+                              <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${regFollowupStatus === 'red' ? 'bg-rose-100 border-rose-400 text-rose-900 font-bold' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'}`}>
                                 <input
                                   type="radio"
                                   name="regTriageStatus"
@@ -6516,12 +6664,12 @@ export default function App() {
                                   className="accent-rose-500 w-4 h-4"
                                 />
                                 <div>
-                                  <span className="block text-xs font-black text-rose-300">سطح قرمز</span>
-                                  <span className="text-[10px] text-slate-400">وضعیت هنوز کنترل نشده</span>
+                                  <span className="block text-xs font-black text-rose-700">سطح قرمز</span>
+                                  <span className="text-[10px] text-slate-500">وضعیت هنوز کنترل نشده</span>
                                 </div>
                               </label>
 
-                              <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${regFollowupStatus === 'yellow' ? 'bg-amber-500/20 border-amber-500 text-amber-200' : 'bg-[#111625] border-white/10 text-slate-300 hover:bg-white/5'}`}>
+                              <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${regFollowupStatus === 'yellow' ? 'bg-amber-100 border-amber-400 text-amber-900 font-bold' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'}`}>
                                 <input
                                   type="radio"
                                   name="regTriageStatus"
@@ -6531,12 +6679,12 @@ export default function App() {
                                   className="accent-amber-500 w-4 h-4"
                                 />
                                 <div>
-                                  <span className="block text-xs font-black text-amber-300">سطح زرد</span>
-                                  <span className="text-[10px] text-slate-400">وضعیت به صورت ناکافی کنترل شده</span>
+                                  <span className="block text-xs font-black text-amber-700">سطح زرد</span>
+                                  <span className="text-[10px] text-slate-500">وضعیت به صورت ناکافی کنترل شده</span>
                                 </div>
                               </label>
 
-                              <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${regFollowupStatus === 'green' ? 'bg-emerald-500/20 border-emerald-500 text-emerald-200' : 'bg-[#111625] border-white/10 text-slate-300 hover:bg-white/5'}`}>
+                              <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${regFollowupStatus === 'green' ? 'bg-emerald-100 border-emerald-400 text-emerald-900 font-bold' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'}`}>
                                 <input
                                   type="radio"
                                   name="regTriageStatus"
@@ -6546,33 +6694,33 @@ export default function App() {
                                   className="accent-emerald-500 w-4 h-4"
                                 />
                                 <div>
-                                  <span className="block text-xs font-black text-emerald-300">سطح سبز</span>
-                                  <span className="text-[10px] text-slate-400">وضعیت کنترل و در محدوده ایمن</span>
+                                  <span className="block text-xs font-black text-emerald-700">سطح سبز</span>
+                                  <span className="text-[10px] text-slate-500">وضعیت کنترل و در محدوده ایمن</span>
                                 </div>
                               </label>
                             </div>
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2.5">آیا بیمار بستری مجدد در ماه اخیر می‌باشد؟</label>
-                            <div className="flex gap-6 items-center h-12 bg-[#111625]/50 border border-white/10 rounded-xl px-4">
-                              <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                            <label className="block text-xs font-bold text-slate-700 mb-2.5">آیا بیمار بستری مجدد در ماه اخیر می‌باشد؟</label>
+                            <div className="flex gap-6 items-center h-12 bg-slate-50 border border-slate-200 rounded-xl px-4">
+                              <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                                 <input
                                   type="radio"
                                   name="regReadmission"
                                   checked={regReadmissionRecentMonth === true}
                                   onChange={() => setRegReadmissionRecentMonth(true)}
-                                  className="accent-sky-500 w-4 h-4"
+                                  className="accent-sky-600 w-4 h-4"
                                 />
                                 <span>بله</span>
                               </label>
-                              <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                              <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                                 <input
                                   type="radio"
                                   name="regReadmission"
                                   checked={regReadmissionRecentMonth === false}
                                   onChange={() => setRegReadmissionRecentMonth(false)}
-                                  className="accent-sky-500 w-4 h-4"
+                                  className="accent-sky-600 w-4 h-4"
                                 />
                                 <span>خیر</span>
                               </label>
@@ -6580,19 +6728,19 @@ export default function App() {
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2.5">آیا بیمار باردار است؟</label>
-                            <div className="flex gap-6 items-center h-12 bg-[#111625]/50 border border-white/10 rounded-xl px-4">
-                              <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                            <label className="block text-xs font-bold text-slate-700 mb-2.5">آیا بیمار باردار است؟</label>
+                            <div className="flex gap-6 items-center h-12 bg-slate-50 border border-slate-200 rounded-xl px-4">
+                              <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                                 <input
                                   type="radio"
                                   name="regIsPregnant"
                                   checked={regIsPregnant === true}
                                   onChange={() => setRegIsPregnant(true)}
-                                  className="accent-pink-500 w-4 h-4"
+                                  className="accent-pink-600 w-4 h-4"
                                 />
-                                <span className="text-pink-300">بله (باردار)</span>
+                                <span className="text-pink-700">بله (باردار)</span>
                               </label>
-                              <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                              <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                                 <input
                                   type="radio"
                                   name="regIsPregnant"
@@ -6601,7 +6749,7 @@ export default function App() {
                                     setRegIsPregnant(false);
                                     setRegIsHighRiskMother(false);
                                   }}
-                                  className="accent-pink-500 w-4 h-4"
+                                  className="accent-pink-600 w-4 h-4"
                                 />
                                 <span>خیر</span>
                               </label>
@@ -6613,48 +6761,48 @@ export default function App() {
                               initial={{ opacity: 0, height: 0 }}
                               animate={{ opacity: 1, height: 'auto' }}
                               exit={{ opacity: 0, height: 0 }}
-                              className="sm:col-span-2 bg-pink-950/20 border border-pink-500/30 p-4 rounded-2xl"
+                              className="sm:col-span-2 bg-pink-50 border border-pink-200 p-4 rounded-2xl"
                             >
-                              <label className="block text-xs font-bold text-pink-200 mb-2.5 flex items-center gap-2">
-                                <AlertTriangle className="w-4 h-4 text-amber-400 animate-pulse" />
+                              <label className="block text-xs font-bold text-pink-900 mb-2.5 flex items-center gap-2">
+                                <AlertTriangle className="w-4 h-4 text-amber-500 animate-pulse" />
                                 <span>آیا بیمار مادر پرخطر است؟</span>
                               </label>
-                              <div className="flex gap-6 items-center h-12 bg-[#111625]/80 border border-pink-500/20 rounded-xl px-4">
-                                <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                              <div className="flex gap-6 items-center h-12 bg-white border border-pink-200 rounded-xl px-4">
+                                <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                                   <input
                                     type="radio"
                                     name="regHighRisk"
                                     checked={regIsHighRiskMother === true}
                                     onChange={() => setRegIsHighRiskMother(true)}
-                                    className="accent-rose-500 w-4 h-4"
+                                    className="accent-rose-600 w-4 h-4"
                                   />
-                                  <span className="text-rose-300">بله (مادر پرخطر)</span>
+                                  <span className="text-rose-700">بله (مادر پرخطر)</span>
                                 </label>
-                                <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                                <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                                   <input
                                     type="radio"
                                     name="regHighRisk"
                                     checked={regIsHighRiskMother === false}
                                     onChange={() => setRegIsHighRiskMother(false)}
-                                    className="accent-rose-500 w-4 h-4"
+                                    className="accent-rose-600 w-4 h-4"
                                   />
                                   <span>خیر</span>
                                 </label>
                               </div>
-                              <p className="text-[10px] text-pink-300/80 mt-2">
+                              <p className="text-[10px] text-pink-700/80 mt-2">
                                 * بیماران مادر پرخطر به طور ویژه در شاخص پیگیری ویژه و غربالگری مادران باردار بیمارستان لحاظ خواهد شد.
                               </p>
                             </motion.div>
                           )}
 
                           <div className="sm:col-span-2">
-                            <label className="block text-xs font-bold text-slate-300 mb-2">توضیح جهت راهنمایی بیمار:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">توضیح جهت راهنمایی بیمار:</label>
                             <textarea
                               placeholder="مثال: بیمار نیاز به بررسی روزانه تب دارد و باید در صورت تهوع شدید به درمانگاه مراجعه کند."
                               value={regGuidanceNotes}
                               onChange={(e) => setRegGuidanceNotes(e.target.value)}
                               rows={3}
-                              className="w-full text-xs bg-[#111625] border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold resize-none"
+                              className="w-full text-xs bg-slate-50 border border-slate-200 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold resize-none"
                             />
                           </div>
 
@@ -6745,11 +6893,11 @@ export default function App() {
                         /* Render Grid of Departments */
                         <div>
                           <div className="mb-6">
-                            <h3 className="text-xl font-black text-white mb-1.5 flex items-center gap-2">
-                              <ClipboardList className="w-6 h-6 text-sky-400 animate-pulse" />
+                            <h3 className="text-xl font-black text-slate-900 mb-1.5 flex items-center gap-2">
+                              <ClipboardList className="w-6 h-6 text-sky-600 animate-pulse" />
                               <span>لیست بخش‌های بیمارستان جهت مشاهده بیماران</span>
                             </h3>
-                            <p className="text-xs text-slate-300 font-medium">لطفاً جهت مشاهده لیست بیماران ترخیص شده و وضعیت خودارزیابی‌ها، بخش مورد نظر را انتخاب فرمایید.</p>
+                            <p className="text-xs text-slate-600 font-medium">لطفاً جهت مشاهده لیست بیماران ترخیص شده و وضعیت خودارزیابی‌ها، بخش مورد نظر را انتخاب فرمایید.</p>
                           </div>
 
                           <div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
@@ -6761,23 +6909,27 @@ export default function App() {
                                   return (
                                     <div
                                       key={dept.id}
-                                      onClick={() => setSelectedDeptFilterId(dept.id)}
-                                      className={`group rounded-[2rem] border bg-gradient-to-br p-6 shadow-xl transition-all duration-300 cursor-pointer flex flex-col justify-between hover:scale-[1.03] active:scale-[0.97] ${style.adminBg} ${style.adminBorder} ${style.adminText} overflow-hidden`}
+                                      onClick={() => {
+                                        setSelectedDeptFilterId(dept.id);
+                                        setAdminPatientSearch('');
+                                        setPatientListPage(1);
+                                      }}
+                                      className="group rounded-[2rem] border border-slate-300 bg-white hover:bg-sky-50/80 p-6 shadow-md hover:shadow-xl transition-all duration-300 cursor-pointer flex flex-col justify-between hover:scale-[1.02] active:scale-[0.98] overflow-hidden"
                                     >
                                     <div>
                                       <div className="flex justify-between items-start">
                                         <div className={`mb-4 ${style.iconBg} p-3 rounded-2xl w-fit shadow-md flex items-center justify-center`}>
                                           <DepartmentIcon id={dept.id} className={`w-8 h-8 ${style.iconColor}`} />
                                         </div>
-                                        <span className="text-[10px] bg-white/5 text-slate-300 border border-white/10 px-2.5 py-1 rounded-lg font-black font-mono">
+                                        <span className="text-[10px] bg-sky-100 text-sky-900 border border-sky-300 px-2.5 py-1 rounded-lg font-black font-mono">
                                           {deptPatients.length} بیمار
                                         </span>
                                       </div>
-                                      <h3 className="text-base font-black text-white mt-2 mb-1 group-hover:text-sky-300 transition-colors">{dept.name}</h3>
-                                      <p className="text-[11px] text-slate-400 font-bold">جهت ورود به کارتابل بیماران و پیگیری علائم کلیک کنید</p>
+                                      <h3 className="text-base font-black text-slate-900 mt-2 mb-1 group-hover:text-sky-700 transition-colors">{dept.name}</h3>
+                                      <p className="text-[11px] text-slate-600 font-bold">جهت ورود به کارتابل بیماران و پیگیری علائم کلیک کنید</p>
                                     </div>
 
-                                    <div className="border-t border-white/5 pt-4 mt-6 flex items-center justify-between text-xs font-bold text-sky-400 group-hover:text-sky-300">
+                                    <div className="border-t border-slate-200 pt-4 mt-6 flex items-center justify-between text-xs font-bold text-sky-700 group-hover:text-sky-800">
                                       <span>ورود به کارتابل</span>
                                       <ChevronLeft className="w-4 h-4 transform group-hover:-translate-x-1 transition-transform" />
                                     </div>
@@ -6789,9 +6941,26 @@ export default function App() {
                       ) : (
                         /* Render Patients list for selected department */
                         (() => {
-                          const deptFilteredPatients = patients.filter(
-                            p => p.departmentId === selectedDeptFilterId && (currentAdmin.role === 'super' || p.departmentId === currentAdmin.departmentId)
-                          );
+                          const activeDeptId = currentAdmin.role === 'super' ? selectedDeptFilterId : (selectedDeptFilterId || currentAdmin.departmentId);
+                          const deptFilteredPatients = patients
+                            .filter(p => {
+                              if (currentAdmin.role === 'super') {
+                                return activeDeptId ? p.departmentId === activeDeptId : true;
+                              } else {
+                                return p.departmentId === currentAdmin.departmentId;
+                              }
+                            })
+                            .filter(p => {
+                              if (!adminPatientSearch || !adminPatientSearch.trim()) return true;
+                              const q = adminPatientSearch.trim().toLowerCase();
+                              return (
+                                (p.name && p.name.toLowerCase().includes(q)) ||
+                                (p.nationalId && p.nationalId.includes(q)) ||
+                                (p.userCode && p.userCode.includes(q)) ||
+                                (p.fileNumber && p.fileNumber.includes(q))
+                              );
+                            });
+
                           const PATIENTS_PER_PAGE = 15;
                           const totalPages = Math.max(1, Math.ceil(deptFilteredPatients.length / PATIENTS_PER_PAGE));
                           const currentPage = Math.min(patientListPage, totalPages);
@@ -6799,6 +6968,8 @@ export default function App() {
                             (currentPage - 1) * PATIENTS_PER_PAGE,
                             currentPage * PATIENTS_PER_PAGE
                           );
+
+                          const activeDeptObj = departments.find(d => d.id === activeDeptId);
 
                           return (
                             <div>
@@ -6808,9 +6979,10 @@ export default function App() {
                                     <button
                                       onClick={() => {
                                         setSelectedDeptFilterId(null);
+                                        setAdminPatientSearch('');
                                         setPatientListPage(1);
                                       }}
-                                      className="inline-flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white text-xs font-bold px-4 py-2.5 rounded-full transition-all duration-300 cursor-pointer shadow-sm"
+                                      className="inline-flex items-center gap-2 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-white text-xs font-bold px-4 py-2.5 rounded-full transition-all duration-300 cursor-pointer shadow-sm"
                                     >
                                       <ArrowRight className="w-4 h-4 text-sky-400" />
                                       <span>بازگشت به لیست بخش‌ها</span>
@@ -6822,102 +6994,140 @@ export default function App() {
                                       setViewingHistoryNationalId('');
                                       setHistorySearchQuery('');
                                     }}
-                                    className="inline-flex items-center gap-2 bg-purple-500/20 hover:bg-purple-500/35 text-purple-200 border border-purple-500/40 px-4 py-2.5 rounded-full text-xs font-black transition-all cursor-pointer shadow-lg shadow-purple-500/10"
+                                    className="inline-flex items-center gap-2 bg-purple-100 hover:bg-purple-200 text-purple-900 border border-purple-300 px-4 py-2.5 rounded-full text-xs font-black transition-all cursor-pointer shadow-sm"
                                     title="جستجو و بررسی کلیه سوابق بستری در سیستم بر اساس کد ملی"
                                   >
-                                    <History className="w-4 h-4 text-purple-300 animate-spin-slow" />
+                                    <History className="w-4 h-4 text-purple-700 animate-spin-slow" />
                                     <span>🔍 استعلام سابقه بستری با کد ملی</span>
                                   </button>
                                 </div>
                                 <div className="text-right">
-                                  <h3 className="text-xl font-black text-white mb-1.5 flex items-center gap-2 justify-end">
-                                    <ClipboardList className="w-6 h-6 text-sky-400 animate-pulse" />
-                                    <span>بیماران بستری بخش {departments.find(d => d.id === selectedDeptFilterId)?.name}</span>
+                                  <h3 className="text-xl font-black text-slate-900 mb-1.5 flex items-center gap-2 justify-end">
+                                    <ClipboardList className="w-6 h-6 text-sky-700 animate-pulse" />
+                                    <span>بیماران بستری بخش {activeDeptObj ? activeDeptObj.name : 'درمانی'}</span>
                                   </h3>
-                                  <p className="text-xs text-slate-300 font-medium">لیست بیماران ثبت شده در کارتابل بخش درمانی (صفحه‌بندی هر ۱۵ بیمار) و خروجی کامل سوابق به اکسل.</p>
+                                  <p className="text-xs text-slate-700 font-medium">لیست بیماران ثبت شده در کارتابل بخش درمانی (صفحه‌بندی هر ۱۵ بیمار) و خروجی کامل سوابق به اکسل.</p>
                                 </div>
                               </div>
 
-                              <div className="hidden md:block overflow-x-auto rounded-2xl border border-white/10 bg-slate-950/20 shadow-xl">
+                              {/* Search Bar for Patient List */}
+                              <div className="mb-4 flex flex-col sm:flex-row items-center justify-between gap-3 bg-white/90 p-3 sm:p-4 rounded-2xl border border-slate-300 shadow-sm">
+                                <div className="flex items-center gap-2.5 w-full sm:w-96 bg-slate-50 border border-slate-300 rounded-xl px-3.5 py-2.5 shadow-xs focus-within:ring-2 focus-within:ring-sky-500">
+                                  <Search className="w-4 h-4 text-sky-600 shrink-0" />
+                                  <input
+                                    type="text"
+                                    value={adminPatientSearch}
+                                    onChange={(e) => {
+                                      setAdminPatientSearch(e.target.value);
+                                      setPatientListPage(1);
+                                    }}
+                                    placeholder="جستجوی نام بیمار، کد ملی، شماره پرونده..."
+                                    className="w-full text-xs font-bold text-slate-900 bg-transparent outline-none placeholder:text-slate-400"
+                                  />
+                                  {adminPatientSearch && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setAdminPatientSearch('')}
+                                      className="text-slate-400 hover:text-slate-700 text-xs font-black px-1"
+                                    >
+                                      ✕
+                                    </button>
+                                  )}
+                                </div>
+                                <div className="text-xs font-black text-slate-800 flex items-center gap-2 self-end sm:self-auto">
+                                  <span className="bg-sky-100/90 border border-sky-300 text-sky-900 px-3 py-1.5 rounded-xl shadow-xs">
+                                    تعداد بیماران: <strong className="text-slate-900 font-mono text-sm">{deptFilteredPatients.length}</strong> نفر
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Clean, Non-Overlapping Patient Table */}
+                              <div className="hidden md:block overflow-x-auto rounded-2xl border border-slate-300 bg-white shadow-xl">
                                 <table className="w-full text-xs text-right border-collapse">
                                   <thead>
-                                    <tr className="bg-white/5 text-slate-300 border-b border-white/10">
-                                      <th className="py-4 px-5 font-black">نام بیمار / دانلود اکسل</th>
-                                      <th className="py-4 px-5 font-black">کد ملی / کد کاربری</th>
-                                      <th className="py-4 px-5 font-black">رمز ورود</th>
-                                      <th className="py-4 px-5 font-black">شماره پرونده</th>
-                                      <th className="py-4 px-5 font-black">سن</th>
-                                      <th className="py-4 px-5 font-black">بیماری</th>
-                                      <th className="py-4 px-5 font-black">آخرین وضعیت پیگیری</th>
-                                      <th className="py-4 px-5 font-black text-center">عملیات مدیریت</th>
+                                    <tr className="bg-slate-100 text-slate-800 border-b border-slate-300">
+                                      <th className="py-4 px-4 font-black whitespace-nowrap">نام بیمار</th>
+                                      <th className="py-4 px-4 font-black whitespace-nowrap">شماره پرونده</th>
+                                      <th className="py-4 px-4 font-black whitespace-nowrap">شناسه / کد کاربری</th>
+                                      <th className="py-4 px-4 font-black whitespace-nowrap">رمز ورود</th>
+                                      <th className="py-4 px-4 font-black whitespace-nowrap">تشخیص & سن</th>
+                                      <th className="py-4 px-4 font-black whitespace-nowrap">تریاژ & سابقه</th>
+                                      <th className="py-4 px-4 font-black whitespace-nowrap">خروجی & گزارش‌ها</th>
+                                      <th className="py-4 px-4 font-black text-center whitespace-nowrap">عملیات</th>
                                     </tr>
                                   </thead>
-                                  <tbody className="divide-y divide-white/5">
+                                  <tbody className="divide-y divide-slate-200">
                                     {paginatedPatients.map(p => (
-                                      <tr key={p.nationalId} className="hover:bg-white/5 transition-colors">
-                                        <td className="py-4 px-5 font-black text-white">
-                                          <div className="flex items-center justify-between gap-2">
-                                            <div className="flex flex-col gap-1">
-                                              <div className="flex items-center gap-1.5">
-                                                <span>{p.name}</span>
-                                                <button
-                                                  type="button"
-                                                  onClick={() => {
-                                                    setViewingHistoryNationalId(p.nationalId);
-                                                    setHistorySearchQuery(p.nationalId);
-                                                  }}
-                                                  className="bg-purple-500/20 hover:bg-purple-500/35 text-purple-200 border border-purple-500/30 px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer shrink-0 shadow-sm"
-                                                  title="مشاهده سابقه بستری بر اساس کد ملی"
-                                                >
-                                                  <History className="w-3 h-3 text-purple-300" />
-                                                  <span>سابقه بستری</span>
-                                                </button>
-                                              </div>
-                                              {p.isPregnant && (
-                                                <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold border w-fit ${p.isHighRiskMother ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' : 'bg-pink-500/20 text-pink-300 border-pink-500/30'}`}>
-                                                  {p.isHighRiskMother ? '🤰⚠️ مادر پرخطر' : '🤰 باردار'}
-                                                </span>
-                                              )}
-                                            </div>
-                                            <button
-                                              type="button"
-                                              onClick={() => exportPatientExcel(p, diseases, departments, messages, customChecklists)}
-                                              className="bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 px-2 py-1 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer shadow-sm shrink-0"
-                                              title="دانلود خروجی کامل ارتباطات بیمار در ۳ شیت اکسل (آموزش، پرسش و پاسخ، رضایتمندی)"
-                                            >
-                                              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
-                                              <span>دانلود اکسل</span>
-                                            </button>
-                                          </div>
-                                        </td>
-                                        <td className="py-4 px-5">
-                                          <div className="flex flex-col gap-0.5 font-mono text-[11px]">
-                                            <span className="font-bold text-slate-300">{p.nationalId.substring(0, 3) + '***' + p.nationalId.substring(7)}</span>
-                                            <span className="text-sky-300 font-black text-[10px]" title="کد کاربری جهت ورود">کد: {p.userCode || p.nationalId}</span>
-                                          </div>
-                                        </td>
-                                        <td className="py-4 px-5 font-mono font-bold text-amber-300 text-[11px]">{p.password || p.nationalId}</td>
-                                        <td className="py-4 px-5 font-mono font-bold text-slate-400">{p.fileNumber}</td>
-                                        <td className="py-4 px-5 text-slate-300 font-bold">{p.age} سال</td>
-                                        <td className="py-4 px-5 font-black text-sky-300">
-                                          {diseases.find(d => d.id === p.diseaseId)?.name}
-                                        </td>
-                                        <td className="py-4 px-5">
-                                          <div className="flex flex-col gap-1.5 items-start">
-                                            {p.followupStatus === 'pending' ? (
-                                              <span className="bg-slate-500/10 text-slate-300 px-2.5 py-1 rounded-full border border-slate-400/20 font-black text-[10px]">در انتظار پاسخ</span>
-                                            ) : p.followupStatus === 'green' ? (
-                                              <span className="bg-emerald-500/20 text-emerald-300 px-2.5 py-1 rounded-full border border-emerald-400/20 font-black text-[10px] shadow-[0_0_10px_rgba(16,185,129,0.1)]">سبز (ایمن)</span>
-                                            ) : p.followupStatus === 'yellow' ? (
-                                              <span className="bg-amber-500/20 text-amber-300 px-2.5 py-1 rounded-full border border-amber-400/20 font-black text-[10px] shadow-[0_0_10px_rgba(245,158,11,0.1)]">زرد (هشدار)</span>
-                                            ) : (
-                                              <span className="bg-rose-500/20 text-rose-300 px-2.5 py-1 rounded-full border border-rose-400/20 font-black text-[10px] animate-pulse shadow-[0_0_10px_rgba(244,63,94,0.2)]">قرمز (اورژانس!)</span>
+                                      <tr key={p.nationalId} className="hover:bg-sky-50/70 transition-colors">
+                                        {/* Column 1: Patient Name & Pregnancy Status */}
+                                        <td className="py-4 px-4 font-black text-slate-900 whitespace-nowrap align-middle">
+                                          <div className="flex flex-col gap-1">
+                                            <span className="text-sm font-black text-slate-900">{p.name || ('بیمار کد ' + (p.userCode || p.nationalId))}</span>
+                                            {p.isPregnant && (
+                                              <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold border w-fit ${p.isHighRiskMother ? 'bg-rose-100 text-rose-800 border-rose-300' : 'bg-pink-100 text-pink-800 border-pink-300'}`}>
+                                                {p.isHighRiskMother ? '🤰⚠️ مادر پرخطر' : '🤰 باردار'}
+                                              </span>
                                             )}
-                                            <div className="flex items-center gap-1 mt-0.5" title="تغییر مستقیم سطح تریاژ بیمار">
+                                          </div>
+                                        </td>
+
+                                        {/* Column 2: File Number */}
+                                        <td className="py-4 px-4 font-mono font-bold text-slate-800 align-middle whitespace-nowrap">
+                                          {p.fileNumber}
+                                        </td>
+
+                                        {/* Column 3: National ID & User Code */}
+                                        <td className="py-4 px-4 align-middle whitespace-nowrap">
+                                          <div className="flex flex-col gap-0.5 font-mono text-[11px]">
+                                            <span className="font-bold text-slate-800">{p.nationalId.substring(0, 3) + '***' + p.nationalId.substring(7)}</span>
+                                            <span className="text-sky-800 font-black text-[10px]" title="کد کاربری جهت ورود">کد: {p.userCode || p.nationalId}</span>
+                                          </div>
+                                        </td>
+
+                                        {/* Column 4: Password */}
+                                        <td className="py-4 px-4 font-mono font-bold text-amber-800 text-[11px] align-middle whitespace-nowrap">
+                                          {p.password || p.nationalId}
+                                        </td>
+
+                                        {/* Column 5: Disease & Age */}
+                                        <td className="py-4 px-4 align-middle whitespace-nowrap">
+                                          <div className="flex flex-col gap-0.5">
+                                            <span className="font-black text-sky-800">{diseases.find(d => d.id === p.diseaseId)?.name || 'سایر'}</span>
+                                            <span className="text-slate-600 font-bold text-[10px]">{p.age} سال</span>
+                                          </div>
+                                        </td>
+
+                                        {/* Column 6: Triage & Admission History */}
+                                        <td className="py-4 px-4 align-middle whitespace-nowrap">
+                                          <div className="flex flex-col gap-2 items-start">
+                                            <div className="flex items-center gap-1.5">
+                                              {p.followupStatus === 'pending' ? (
+                                                <span className="bg-slate-100 text-slate-800 px-2.5 py-1 rounded-full border border-slate-300 font-black text-[10px]">در انتظار پاسخ</span>
+                                              ) : p.followupStatus === 'green' ? (
+                                                <span className="bg-emerald-100 text-emerald-900 px-2.5 py-1 rounded-full border border-emerald-300 font-black text-[10px]">سبز (ایمن)</span>
+                                              ) : p.followupStatus === 'yellow' ? (
+                                                <span className="bg-amber-100 text-amber-900 px-2.5 py-1 rounded-full border border-amber-300 font-black text-[10px]">زرد (هشدار)</span>
+                                              ) : (
+                                                <span className="bg-rose-100 text-rose-900 px-2.5 py-1 rounded-full border border-rose-300 font-black text-[10px] animate-pulse">قرمز (اورژانس!)</span>
+                                              )}
+                                              <button
+                                                type="button"
+                                                onClick={() => {
+                                                  setViewingHistoryNationalId(p.nationalId);
+                                                  setHistorySearchQuery(p.nationalId);
+                                                }}
+                                                className="bg-purple-100 hover:bg-purple-200 text-purple-900 border border-purple-300 px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer shrink-0 shadow-xs"
+                                                title="مشاهده سابقه بستری بر اساس کد ملی"
+                                              >
+                                                <History className="w-3 h-3 text-purple-700" />
+                                                <span>سابقه بستری</span>
+                                              </button>
+                                            </div>
+                                            <div className="flex items-center gap-1" title="تغییر مستقیم سطح تریاژ بیمار">
                                               <button
                                                 type="button"
                                                 onClick={() => handleUpdatePatientFollowupStatus(p.nationalId, 'red')}
-                                                className={`px-1.5 py-0.5 rounded text-[9px] font-black border transition-all cursor-pointer ${p.followupStatus === 'red' ? 'bg-rose-500 text-white border-rose-400 shadow-sm' : 'bg-white/5 text-rose-400/60 border-white/10 hover:bg-rose-500/20 hover:text-rose-300'}`}
+                                                className={`px-2 py-0.5 rounded text-[9px] font-black border transition-all cursor-pointer ${p.followupStatus === 'red' ? 'bg-rose-600 text-white border-rose-500 shadow-sm' : 'bg-slate-100 text-rose-800 border-slate-300 hover:bg-rose-200'}`}
                                                 title="سطح قرمز (کنترل‌نشده)"
                                               >
                                                 قرمز
@@ -6925,7 +7135,7 @@ export default function App() {
                                               <button
                                                 type="button"
                                                 onClick={() => handleUpdatePatientFollowupStatus(p.nationalId, 'yellow')}
-                                                className={`px-1.5 py-0.5 rounded text-[9px] font-black border transition-all cursor-pointer ${p.followupStatus === 'yellow' ? 'bg-amber-500 text-white border-amber-400 shadow-sm' : 'bg-white/5 text-amber-400/60 border-white/10 hover:bg-amber-500/20 hover:text-amber-300'}`}
+                                                className={`px-2 py-0.5 rounded text-[9px] font-black border transition-all cursor-pointer ${p.followupStatus === 'yellow' ? 'bg-amber-500 text-white border-amber-400 shadow-sm' : 'bg-slate-100 text-amber-800 border-slate-300 hover:bg-amber-200'}`}
                                                 title="سطح زرد (کنترل ناکافی)"
                                               >
                                                 زرد
@@ -6933,7 +7143,7 @@ export default function App() {
                                               <button
                                                 type="button"
                                                 onClick={() => handleUpdatePatientFollowupStatus(p.nationalId, 'green')}
-                                                className={`px-1.5 py-0.5 rounded text-[9px] font-black border transition-all cursor-pointer ${p.followupStatus === 'green' || (!p.followupStatus && p.followupStatus !== 'pending') ? 'bg-emerald-500 text-white border-emerald-400 shadow-sm' : 'bg-white/5 text-emerald-400/60 border-white/10 hover:bg-emerald-500/20 hover:text-emerald-300'}`}
+                                                className={`px-2 py-0.5 rounded text-[9px] font-black border transition-all cursor-pointer ${p.followupStatus === 'green' || (!p.followupStatus && p.followupStatus !== 'pending') ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm' : 'bg-slate-100 text-emerald-800 border-slate-300 hover:bg-emerald-200'}`}
                                                 title="سطح سبز (محدوده ایمن)"
                                               >
                                                 سبز
@@ -6941,34 +7151,49 @@ export default function App() {
                                             </div>
                                           </div>
                                         </td>
-                                        <td className="py-4 px-5 text-center">
-                                          <div className="flex items-center justify-center gap-2">
+
+                                        {/* Column 7: Export & Checklists */}
+                                        <td className="py-4 px-4 align-middle whitespace-nowrap">
+                                          <div className="flex items-center gap-1.5">
+                                            <button
+                                              type="button"
+                                              onClick={() => exportPatientExcel(p, diseases, departments, messages, customChecklists)}
+                                              className="bg-emerald-100 hover:bg-emerald-200 text-emerald-900 border border-emerald-300 px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer shadow-xs shrink-0"
+                                              title="دانلود خروجی اکسل کامل"
+                                            >
+                                              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                                              <span>دانلود اکسل</span>
+                                            </button>
                                             <button
                                               type="button"
                                               onClick={() => setViewingFollowupsPatient(p)}
-                                              className="bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 px-2.5 py-1.5 rounded-lg font-bold text-[10px] transition-all flex items-center gap-1 cursor-pointer"
-                                              title="مشاهده گزارش‌های روزانه و خودارزیابی‌های بیمار"
+                                              className="bg-sky-100 hover:bg-sky-200 text-sky-900 border border-sky-300 px-2.5 py-1.5 rounded-lg font-bold text-[10px] transition-all flex items-center gap-1 cursor-pointer shrink-0"
+                                              title="مشاهده گزارش‌های پیگیری علائم"
                                             >
-                                              <ClipboardCheck className="w-3.5 h-3.5" />
-                                              <span>پیگیری علائم</span>
+                                              <ClipboardCheck className="w-3.5 h-3.5 text-sky-700" />
+                                              <span>پیگیری</span>
                                             </button>
-                                            {p.satisfactionSurvey ? (
+                                            {p.satisfactionSurvey && (
                                               <button
                                                 type="button"
                                                 onClick={() => setSelectedSurveyPatient(p)}
-                                                className="bg-teal-500/10 hover:bg-teal-500/20 text-teal-400 border border-teal-500/20 px-2.5 py-1.5 rounded-lg font-bold text-[10px] transition-all flex items-center gap-1 cursor-pointer"
+                                                className="bg-teal-100 hover:bg-teal-200 text-teal-900 border border-teal-300 px-2.5 py-1.5 rounded-lg font-bold text-[10px] transition-all flex items-center gap-1 cursor-pointer shrink-0"
                                                 title="مشاهده پاسخنامه رضایت‌مندی"
                                               >
-                                                <HeartHandshake className="w-3.5 h-3.5" />
-                                                <span>فرم رضایت</span>
+                                                <HeartHandshake className="w-3.5 h-3.5 text-teal-700" />
+                                                <span>رضایت</span>
                                               </button>
-                                            ) : (
-                                              <span className="text-[10px] text-slate-500 font-bold px-2 py-1.5">فاقد فرم</span>
                                             )}
+                                          </div>
+                                        </td>
+
+                                        {/* Column 8: Management Actions */}
+                                        <td className="py-4 px-4 text-center align-middle whitespace-nowrap">
+                                          <div className="flex items-center justify-center gap-1.5">
                                             <button
                                               type="button"
                                               onClick={() => handleStartEditPatient(p)}
-                                              className="bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 px-2.5 py-1.5 rounded-lg font-bold text-[10px] transition-all flex items-center gap-1 cursor-pointer"
+                                              className="bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 px-2.5 py-1.5 rounded-lg font-bold text-[10px] transition-all flex items-center gap-1 cursor-pointer"
                                             >
                                               <Edit className="w-3.5 h-3.5" />
                                               <span>ویرایش</span>
@@ -6976,7 +7201,7 @@ export default function App() {
                                             <button
                                               type="button"
                                               onClick={() => setDeletingPatientId(p.nationalId)}
-                                              className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 px-2.5 py-1.5 rounded-lg font-bold text-[10px] transition-all flex items-center gap-1 cursor-pointer"
+                                              className="bg-rose-100 hover:bg-rose-200 text-rose-900 border border-rose-300 px-2.5 py-1.5 rounded-lg font-bold text-[10px] transition-all flex items-center gap-1 cursor-pointer"
                                             >
                                               <Trash2 className="w-3.5 h-3.5" />
                                               <span>حذف</span>
@@ -6987,8 +7212,8 @@ export default function App() {
                                     ))}
                                     {deptFilteredPatients.length === 0 && (
                                       <tr>
-                                        <td colSpan={7} className="text-center py-12 text-slate-500 font-bold">
-                                          بیماری یافت نشد.
+                                        <td colSpan={8} className="text-center py-12 text-slate-600 font-bold">
+                                          هیچ بیماری در این بخش یافت نشد.
                                         </td>
                                       </tr>
                                     )}
@@ -6999,108 +7224,105 @@ export default function App() {
                               {/* Mobile View: High-Contrast Grid Cards */}
                               <div className="block md:hidden space-y-4">
                                 {paginatedPatients.map(p => (
-                                  <div key={p.nationalId} className="bg-white/5 border border-white/10 rounded-2xl p-5 space-y-3 shadow-lg relative overflow-hidden">
-                                    <div className="flex justify-between items-center border-b border-white/5 pb-2.5">
+                                  <div key={p.nationalId} className="bg-white border border-slate-300 rounded-2xl p-4 space-y-3 shadow-md relative overflow-hidden text-slate-900">
+                                    <div className="flex justify-between items-center border-b border-slate-200 pb-2.5">
                                       <div className="flex flex-wrap items-center gap-1.5">
-                                        <span className="font-black text-white text-sm">{p.name}</span>
+                                        <span className="font-black text-slate-900 text-sm">{p.name || ('بیمار کد ' + (p.userCode || p.nationalId))}</span>
+                                        {p.isPregnant && (
+                                          <span className={`text-[9px] px-2 py-0.5 rounded-full font-bold border ${p.isHighRiskMother ? 'bg-rose-100 text-rose-800 border-rose-300' : 'bg-pink-100 text-pink-800 border-pink-300'}`}>
+                                            {p.isHighRiskMother ? '🤰⚠️ مادر پرخطر' : '🤰 باردار'}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {p.followupStatus === 'pending' ? (
+                                        <span className="bg-slate-100 text-slate-800 px-2.5 py-1 rounded-full border border-slate-300 font-black text-[10px]">انتظار پاسخ</span>
+                                      ) : p.followupStatus === 'green' ? (
+                                        <span className="bg-emerald-100 text-emerald-900 px-2.5 py-1 rounded-full border border-emerald-300 font-black text-[10px]">ایمن (سبز)</span>
+                                      ) : p.followupStatus === 'yellow' ? (
+                                        <span className="bg-amber-100 text-amber-900 px-2.5 py-1 rounded-full border border-amber-300 font-black text-[10px]">هشدار (زرد)</span>
+                                      ) : (
+                                        <span className="bg-rose-100 text-rose-900 px-2.5 py-1 rounded-full border border-rose-300 font-black text-[10px] animate-pulse">اورژانس (قرمز!)</span>
+                                      )}
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-y-3 gap-x-4 text-xs">
+                                      <div>
+                                        <span className="text-slate-500 block mb-0.5">کد ملی بیمار:</span>
+                                        <span className="font-mono font-bold text-slate-800">{p.nationalId.substring(0, 3) + '***' + p.nationalId.substring(7)}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500 block mb-0.5">کد کاربری:</span>
+                                        <span className="font-mono font-bold text-sky-800">{p.userCode || p.nationalId}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500 block mb-0.5">رمز ورود:</span>
+                                        <span className="font-mono font-bold text-amber-800">{p.password || p.nationalId}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500 block mb-0.5">شماره پرونده:</span>
+                                        <span className="font-mono font-bold text-slate-800">{p.fileNumber}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500 block mb-0.5">تشخیص بیماری:</span>
+                                        <span className="font-black text-sky-800">{diseases.find(d => d.id === p.diseaseId)?.name}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500 block mb-0.5">سن بیمار:</span>
+                                        <span className="font-bold text-slate-800">{p.age} سال</span>
+                                      </div>
+                                    </div>
+                                    <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                                      <div className="flex items-center gap-1.5">
+                                        <button
+                                          type="button"
+                                          onClick={() => exportPatientExcel(p, diseases, departments, messages, customChecklists)}
+                                          className="bg-emerald-100 text-emerald-900 border border-emerald-300 px-2.5 py-1.5 rounded-lg text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                                        >
+                                          <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                                          <span>اکسل</span>
+                                        </button>
                                         <button
                                           type="button"
                                           onClick={() => {
                                             setViewingHistoryNationalId(p.nationalId);
                                             setHistorySearchQuery(p.nationalId);
                                           }}
-                                          className="bg-purple-500/20 hover:bg-purple-500/35 text-purple-200 border border-purple-500/30 px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer shrink-0 shadow-sm"
-                                          title="مشاهده سابقه بستری بر اساس کد ملی"
+                                          className="bg-purple-100 text-purple-900 border border-purple-300 px-2.5 py-1.5 rounded-lg text-[10px] font-bold flex items-center gap-1 cursor-pointer"
                                         >
-                                          <History className="w-3 h-3 text-purple-300" />
+                                          <History className="w-3.5 h-3.5 text-purple-700" />
                                           <span>سابقه بستری</span>
                                         </button>
+                                      </div>
+                                      <div className="flex items-center gap-1.5">
                                         <button
                                           type="button"
-                                          onClick={() => exportPatientExcel(p, diseases, departments, messages, customChecklists)}
-                                          className="bg-emerald-500/15 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer shrink-0"
-                                          title="دانلود خروجی اکسل ۳ شیت"
+                                          onClick={() => setViewingFollowupsPatient(p)}
+                                          className="bg-sky-100 text-sky-900 border border-sky-300 px-2.5 py-1.5 rounded-lg text-[10px] font-bold flex items-center gap-1 cursor-pointer"
                                         >
-                                          <FileSpreadsheet className="w-3 h-3 text-emerald-400" />
-                                          <span>اکسل</span>
+                                          <ClipboardCheck className="w-3.5 h-3.5 text-sky-700" />
+                                          <span>پیگیری</span>
                                         </button>
-                                      </div>
-                                      {p.followupStatus === 'pending' ? (
-                                        <span className="bg-slate-500/10 text-slate-300 px-2.5 py-1 rounded-full border border-slate-400/20 font-black text-[10px]">انتظار پاسخ</span>
-                                      ) : p.followupStatus === 'green' ? (
-                                        <span className="bg-emerald-500/20 text-emerald-300 px-2.5 py-1 rounded-full border border-emerald-400/20 font-black text-[10px]">ایمن (سبز)</span>
-                                      ) : p.followupStatus === 'yellow' ? (
-                                        <span className="bg-amber-500/20 text-amber-300 px-2.5 py-1 rounded-full border border-amber-400/20 font-black text-[10px]">هشدار (زرد)</span>
-                                      ) : (
-                                        <span className="bg-rose-500/20 text-rose-300 px-2.5 py-1 rounded-full border border-rose-400/20 font-black text-[10px] animate-pulse">اورژانس (قرمز!)</span>
-                                      )}
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-y-3 gap-x-4 text-xs">
-                                      <div>
-                                        <span className="text-slate-400 block mb-0.5">کد ملی بیمار:</span>
-                                        <span className="font-mono font-bold text-slate-300">{p.nationalId.substring(0, 3) + '***' + p.nationalId.substring(7)}</span>
-                                      </div>
-                                      <div>
-                                        <span className="text-slate-400 block mb-0.5">کد کاربری جهت ورود:</span>
-                                        <span className="font-mono font-bold text-sky-300">{p.userCode || p.nationalId}</span>
-                                      </div>
-                                      <div>
-                                        <span className="text-slate-400 block mb-0.5">رمز ورود:</span>
-                                        <span className="font-mono font-bold text-amber-300">{p.password || p.nationalId}</span>
-                                      </div>
-                                      <div>
-                                        <span className="text-slate-400 block mb-0.5">شماره پرونده:</span>
-                                        <span className="font-mono font-bold text-slate-300">{p.fileNumber}</span>
-                                      </div>
-                                      <div>
-                                        <span className="text-slate-400 block mb-0.5">تشخیص بیماری:</span>
-                                        <span className="font-black text-sky-300">{diseases.find(d => d.id === p.diseaseId)?.name}</span>
-                                      </div>
-                                      <div>
-                                        <span className="text-slate-400 block mb-0.5">سن بیمار:</span>
-                                        <span className="font-bold text-slate-300">{p.age} سال</span>
-                                      </div>
-                                    </div>
-                                    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-white/5 pt-2.5 mt-2">
-                                      <button
-                                        type="button"
-                                        onClick={() => setViewingFollowupsPatient(p)}
-                                        className="bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 px-3 py-1.5 rounded-lg font-bold text-[11px] transition-all flex items-center gap-1 cursor-pointer"
-                                      >
-                                        <ClipboardCheck className="w-3.5 h-3.5" />
-                                        <span>پیگیری علائم</span>
-                                      </button>
-                                      {p.satisfactionSurvey && (
                                         <button
                                           type="button"
-                                          onClick={() => setSelectedSurveyPatient(p)}
-                                          className="bg-teal-500/10 hover:bg-teal-500/20 text-teal-400 border border-teal-500/20 px-3 py-1.5 rounded-lg font-bold text-[11px] transition-all flex items-center gap-1 cursor-pointer"
+                                          onClick={() => handleStartEditPatient(p)}
+                                          className="bg-slate-100 text-slate-800 border border-slate-300 px-2.5 py-1.5 rounded-lg text-[10px] font-bold flex items-center gap-1 cursor-pointer"
                                         >
-                                          <HeartHandshake className="w-3.5 h-3.5" />
-                                          <span>فرم رضایت</span>
+                                          <Edit className="w-3.5 h-3.5" />
+                                          <span>ویرایش</span>
                                         </button>
-                                      )}
-                                      <button
-                                        type="button"
-                                        onClick={() => handleStartEditPatient(p)}
-                                        className="bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 px-3 py-1.5 rounded-lg font-bold text-[11px] transition-all flex items-center gap-1 cursor-pointer"
-                                      >
-                                        <Edit className="w-3.5 h-3.5" />
-                                        <span>ویرایش مشخصات</span>
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setDeletingPatientId(p.nationalId)}
-                                        className="bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 px-3 py-1.5 rounded-lg font-bold text-[11px] transition-all flex items-center gap-1 cursor-pointer"
-                                      >
-                                        <Trash2 className="w-3.5 h-3.5" />
-                                        <span>حذف پرونده</span>
-                                      </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setDeletingPatientId(p.nationalId)}
+                                          className="bg-rose-100 text-rose-900 border border-rose-300 px-2.5 py-1.5 rounded-lg text-[10px] font-bold flex items-center gap-1 cursor-pointer"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                          <span>حذف</span>
+                                        </button>
+                                      </div>
                                     </div>
                                   </div>
                                 ))}
                                 {deptFilteredPatients.length === 0 && (
-                                  <div className="text-center py-12 text-slate-500 font-bold text-xs bg-white/5 border border-white/10 rounded-2xl">
+                                  <div className="text-center py-12 text-slate-400 font-bold text-xs bg-[#131c33] border border-slate-800 rounded-2xl">
                                     بیماری یافت نشد.
                                   </div>
                                 )}
@@ -7167,45 +7389,54 @@ export default function App() {
                       {viewingFollowupsPatient && (() => {
                         const subs = viewingFollowupsPatient.checklistSubmissions || [];
                         return (
-                          <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/85 backdrop-blur-md animate-fade-in text-right flex justify-center items-start p-4 scrollbar-thin">
-                            <div className="bg-[#111625] border border-white/10 rounded-[2rem] w-full max-w-2xl my-8 p-6 md:p-8 shadow-2xl relative text-right">
-                              <div className="flex justify-between items-center border-b border-white/10 pb-4 mb-5">
+                          <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm animate-fade-in text-right flex justify-center items-start p-4 scrollbar-thin">
+                            <div className="bg-white border border-slate-200 rounded-[2rem] w-full max-w-2xl my-8 p-6 md:p-8 shadow-2xl relative text-right text-slate-800">
+                              <div className="flex justify-between items-center border-b border-slate-200 pb-4 mb-5">
                                 <div className="flex items-center gap-2">
-                                  <ClipboardCheck className="w-6 h-6 text-emerald-400" />
-                                  <h3 className="text-sm font-black text-white">تاریخچه خودارزیابی‌ها و گزارش‌های روزانه بیمار: {viewingFollowupsPatient.name}</h3>
+                                  <ClipboardCheck className="w-6 h-6 text-emerald-600" />
+                                  <h3 className="text-sm font-black text-slate-900">
+                                    تاریخچه خودارزیابی‌ها و گزارش‌های روزانه بیمار:{' '}
+                                    {viewingFollowupsPatient.name && viewingFollowupsPatient.name.trim() && !viewingFollowupsPatient.name.startsWith('بیمار کد ')
+                                      ? viewingFollowupsPatient.name.trim()
+                                      : (patients.find(p => p.nationalId === viewingFollowupsPatient.nationalId)?.name || ('بیمار کد ' + viewingFollowupsPatient.nationalId))}
+                                  </h3>
                                 </div>
                                 <button
                                   type="button"
                                   onClick={() => setViewingFollowupsPatient(null)}
-                                  className="text-slate-400 hover:text-white transition-colors cursor-pointer text-[10px] font-black flex items-center gap-1 bg-white/5 px-3 py-1.5 rounded-xl border border-white/5"
+                                  className="text-slate-700 hover:text-slate-900 transition-colors cursor-pointer text-xs font-black flex items-center gap-1 bg-slate-100 hover:bg-slate-200 px-3.5 py-1.5 rounded-xl border border-slate-300 shadow-sm"
                                 >
                                   ✕ بستن پنجره
                                 </button>
                               </div>
 
-                              <div className="bg-[#111625]/90 border border-emerald-500/30 p-4 rounded-2xl mb-6 space-y-3">
-                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs font-bold text-white border-b border-white/10 pb-3">
+                              <div className="bg-emerald-50/80 border border-emerald-200 p-4 rounded-2xl mb-6 space-y-3">
+                                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs font-bold text-slate-800 border-b border-emerald-200 pb-3">
                                   <div>
-                                    <span className="text-slate-400 block mb-1">نام و فامیلی:</span>
-                                    <span className="text-white">{viewingFollowupsPatient.name}</span>
+                                    <span className="text-slate-500 block mb-1">نام و فامیلی:</span>
+                                    <span className="text-slate-900 font-extrabold">
+                                      {viewingFollowupsPatient.name && viewingFollowupsPatient.name.trim() && !viewingFollowupsPatient.name.startsWith('بیمار کد ')
+                                        ? viewingFollowupsPatient.name.trim()
+                                        : (patients.find(p => p.nationalId === viewingFollowupsPatient.nationalId)?.name || ('بیمار کد ' + viewingFollowupsPatient.nationalId))}
+                                    </span>
                                   </div>
                                   <div>
-                                    <span className="text-slate-400 block mb-1">کد ملی:</span>
-                                    <span className="text-slate-300">{viewingFollowupsPatient.nationalId}</span>
+                                    <span className="text-slate-500 block mb-1">کد ملی:</span>
+                                    <span className="text-slate-700 font-mono">{viewingFollowupsPatient.nationalId}</span>
                                   </div>
                                   <div>
-                                    <span className="text-slate-400 block mb-1">شماره پرونده:</span>
-                                    <span className="text-teal-300 font-mono">{viewingFollowupsPatient.fileNumber}</span>
+                                    <span className="text-slate-500 block mb-1">شماره پرونده:</span>
+                                    <span className="text-teal-800 font-mono font-black">{viewingFollowupsPatient.fileNumber}</span>
                                   </div>
                                 </div>
 
                                 <div className="pt-1">
-                                  <label className="block text-xs font-black text-emerald-300 mb-2 flex items-center justify-between">
+                                  <label className="block text-xs font-black text-emerald-900 mb-2 flex items-center justify-between">
                                     <span className="flex items-center gap-1.5">
-                                      <Activity className="w-4 h-4 text-emerald-400" />
+                                      <Activity className="w-4 h-4 text-emerald-600" />
                                       <span>ویرایش و تعیین وضعیت تریاژ بیمار:</span>
                                     </span>
-                                    <span className="text-[10px] text-slate-400 font-normal">
+                                    <span className="text-[10px] text-slate-500 font-normal">
                                       (تغییرات بلافاصله ذخیره و در شاخص‌ها و لیست بیمارستان اعمال می‌شود)
                                     </span>
                                   </label>
@@ -7216,15 +7447,15 @@ export default function App() {
                                       onClick={() => handleUpdatePatientFollowupStatus(viewingFollowupsPatient.nationalId, 'red')}
                                       className={`p-2.5 rounded-xl border flex items-center justify-between text-right transition-all cursor-pointer ${
                                         viewingFollowupsPatient.followupStatus === 'red'
-                                          ? 'bg-rose-500/25 border-rose-500 text-rose-200 ring-2 ring-rose-500/40 shadow-lg'
-                                          : 'bg-white/5 border-white/10 text-slate-400 hover:bg-rose-500/10 hover:text-rose-300'
+                                          ? 'bg-rose-100 border-rose-400 text-rose-900 ring-2 ring-rose-400/40 shadow-sm'
+                                          : 'bg-white border-slate-200 text-slate-700 hover:bg-rose-50'
                                       }`}
                                     >
                                       <div>
-                                        <span className="block text-xs font-black text-rose-300">سطح قرمز</span>
-                                        <span className="text-[9px] text-rose-200/70">کنترل‌نشده (اورژانس)</span>
+                                        <span className="block text-xs font-black text-rose-700">سطح قرمز</span>
+                                        <span className="text-[9px] text-rose-600">کنترل‌نشده (اورژانس)</span>
                                       </div>
-                                      {viewingFollowupsPatient.followupStatus === 'red' && <CheckCircle className="w-4 h-4 text-rose-400 shrink-0" />}
+                                      {viewingFollowupsPatient.followupStatus === 'red' && <CheckCircle className="w-4 h-4 text-rose-600 shrink-0" />}
                                     </button>
 
                                     <button
@@ -7232,15 +7463,15 @@ export default function App() {
                                       onClick={() => handleUpdatePatientFollowupStatus(viewingFollowupsPatient.nationalId, 'yellow')}
                                       className={`p-2.5 rounded-xl border flex items-center justify-between text-right transition-all cursor-pointer ${
                                         viewingFollowupsPatient.followupStatus === 'yellow'
-                                          ? 'bg-amber-500/25 border-amber-500 text-amber-200 ring-2 ring-amber-500/40 shadow-lg'
-                                          : 'bg-white/5 border-white/10 text-slate-400 hover:bg-amber-500/10 hover:text-amber-300'
+                                          ? 'bg-amber-100 border-amber-400 text-amber-900 ring-2 ring-amber-400/40 shadow-sm'
+                                          : 'bg-white border-slate-200 text-slate-700 hover:bg-amber-50'
                                       }`}
                                     >
                                       <div>
-                                        <span className="block text-xs font-black text-amber-300">سطح زرد</span>
-                                        <span className="text-[9px] text-amber-200/70">کنترل ناکافی (هشدار)</span>
+                                        <span className="block text-xs font-black text-amber-700">سطح زرد</span>
+                                        <span className="text-[9px] text-amber-600">کنترل ناکافی (هشدار)</span>
                                       </div>
-                                      {viewingFollowupsPatient.followupStatus === 'yellow' && <CheckCircle className="w-4 h-4 text-amber-400 shrink-0" />}
+                                      {viewingFollowupsPatient.followupStatus === 'yellow' && <CheckCircle className="w-4 h-4 text-amber-600 shrink-0" />}
                                     </button>
 
                                     <button
@@ -7248,8 +7479,8 @@ export default function App() {
                                       onClick={() => handleUpdatePatientFollowupStatus(viewingFollowupsPatient.nationalId, 'green')}
                                       className={`p-2.5 rounded-xl border flex items-center justify-between text-right transition-all cursor-pointer ${
                                         viewingFollowupsPatient.followupStatus === 'green' || !viewingFollowupsPatient.followupStatus
-                                          ? 'bg-emerald-500/25 border-emerald-500 text-emerald-200 ring-2 ring-emerald-500/40 shadow-lg'
-                                          : 'bg-white/5 border-white/10 text-slate-400 hover:bg-emerald-500/10 hover:text-emerald-300'
+                                          ? 'bg-emerald-100 border-emerald-400 text-emerald-900 ring-2 ring-emerald-400/40 shadow-sm'
+                                          : 'bg-white border-slate-200 text-slate-700 hover:bg-emerald-50'
                                       }`}
                                     >
                                       <div>
@@ -7266,22 +7497,22 @@ export default function App() {
 
                               <div className="flex-1 overflow-y-auto space-y-4 pr-1 pl-1 min-h-0 scrollbar-thin">
                                 {subs.length === 0 ? (
-                                  <div className="text-center py-12 text-slate-500 font-bold bg-white/5 rounded-2xl border border-white/5">
+                                  <div className="text-center py-12 text-slate-500 font-bold bg-slate-50 rounded-2xl border border-slate-200">
                                     هنوز هیچ گزارش خودارزیابی یا پیگیری روزانه توسط این بیمار در سامانه ثبت نشده است.
                                   </div>
                                 ) : (
                                   [...subs].reverse().map((sub, sIdx) => {
                                     const checklist = customChecklists.find(c => c.id === sub.checklistId);
                                     return (
-                                      <div key={sIdx} className="bg-slate-900/50 border border-white/10 p-5 rounded-2xl space-y-3.5">
-                                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-white/5 pb-2.5">
+                                      <div key={sIdx} className="bg-slate-50 border border-slate-200 p-5 rounded-2xl space-y-3.5 shadow-sm">
+                                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200 pb-2.5">
                                           <div className="flex items-center gap-2">
                                             <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-ping" />
-                                            <span className="text-xs font-black text-emerald-400">
+                                            <span className="text-xs font-black text-emerald-800">
                                               {checklist?.title || 'چک‌لیست خودارزیابی ترخیص'}
                                             </span>
                                           </div>
-                                          <span className="text-[11px] font-mono font-bold text-amber-300 bg-amber-500/10 border border-amber-500/20 px-3 py-1 rounded-full">
+                                          <span className="text-[11px] font-mono font-bold text-amber-900 bg-amber-100 border border-amber-300 px-3 py-1 rounded-full">
                                             زمان ثبت: {new Date(sub.submittedAt).toLocaleString('fa-IR')}
                                           </span>
                                         </div>
@@ -7290,43 +7521,43 @@ export default function App() {
                                           {checklist?.questions.map((q) => {
                                             const ans = sub.answers[q.id];
                                             let displayAns = ans;
-                                            let ansColor = 'text-slate-200';
+                                            let ansColor = 'text-slate-800';
 
                                             if (q.type === 'qualitative' || q.type === 'multiple_choice' || q.type === 'emoji') {
                                               if (ans === 'yes' || ans === 'perfect' || ans === 'true' || ans === true) {
                                                 displayAns = 'بله / خوب / مناسب';
-                                                ansColor = 'text-emerald-400 font-black';
+                                                ansColor = 'text-emerald-700 font-black';
                                               } else if (ans === 'no' || ans === 'bad' || ans === 'false' || ans === false) {
                                                 displayAns = 'خیر / نامناسب / بحرانی';
-                                                ansColor = 'text-rose-400 font-black';
+                                                ansColor = 'text-rose-700 font-black';
                                               } else if (ans === 'partial' || ans === 'medium') {
                                                 displayAns = 'تا حدودی / متوسط';
-                                                ansColor = 'text-amber-400 font-black';
+                                                ansColor = 'text-amber-700 font-black';
                                               }
                                             } else if (q.type === 'descriptive') {
                                               displayAns = ans || '(پاسخ خالی)';
-                                              ansColor = 'text-sky-300 font-medium whitespace-pre-wrap leading-relaxed';
+                                              ansColor = 'text-sky-800 font-bold whitespace-pre-wrap leading-relaxed';
                                             } else if (q.type === 'quantitative') {
                                               displayAns = ans ? `${ans}` : '(ثبت نشده)';
                                               const numVal = parseFloat(ans);
                                               if (!isNaN(numVal)) {
                                                 if (q.text.includes('تب') || q.text.includes('درجه')) {
                                                   if (numVal >= 38) {
-                                                    ansColor = 'text-rose-400 font-black bg-rose-500/10 px-2 py-0.5 rounded-md border border-rose-500/20';
+                                                    ansColor = 'text-rose-800 font-black bg-rose-100 px-2 py-0.5 rounded-md border border-rose-300';
                                                   } else if (numVal >= 37.5) {
-                                                    ansColor = 'text-amber-400 font-black bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20';
+                                                    ansColor = 'text-amber-800 font-black bg-amber-100 px-2 py-0.5 rounded-md border border-amber-300';
                                                   } else {
-                                                    ansColor = 'text-emerald-400 font-black';
+                                                    ansColor = 'text-emerald-700 font-black';
                                                   }
                                                 } else {
-                                                  ansColor = 'text-emerald-400 font-black';
+                                                  ansColor = 'text-emerald-700 font-black';
                                                 }
                                               }
                                             }
 
                                             return (
-                                              <div key={q.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#111625]/60 border border-white/5 p-3 rounded-xl hover:bg-[#111625] transition-all">
-                                                <span className="font-bold text-slate-300 leading-relaxed max-w-md">{q.text}</span>
+                                              <div key={q.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white border border-slate-200/80 p-3 rounded-xl hover:bg-slate-100 transition-all">
+                                                <span className="font-bold text-slate-800 leading-relaxed max-w-md">{q.text}</span>
                                                 <div className={`shrink-0 text-left sm:text-right ${ansColor}`}>
                                                   {displayAns}
                                                 </div>
@@ -7340,15 +7571,15 @@ export default function App() {
                                               {Object.entries(sub.answers).map(([key, val]) => {
                                                 let displayKey = key;
                                                 let displayVal = val === true ? 'دارد' : val === false ? 'ندارد' : String(val);
-                                                let valColor = val === true ? 'text-rose-400 font-black' : 'text-emerald-400';
+                                                let valColor = val === true ? 'text-rose-700 font-black' : 'text-emerald-700 font-bold';
 
                                                 if (key === 'red_1') displayKey = 'تنگی نفس شدید، درد شدید قفسه سینه، تب بالای ۳۸، تاری دید، تشنج، خونریزی شدید';
                                                 if (key === 'yellow_1') displayKey = 'تب خفیف، ورم متوسط پاها، تنگی نفس خفیف، نوسان قند یا فشار خون، سوزش زخم';
                                                 if (key === 'green_1') displayKey = 'مصرف منظم داروها، رعایت رژیم غذایی، پوزیشن‌دهی مناسب';
 
                                                 return (
-                                                  <div key={key} className="flex items-center justify-between bg-[#111625]/60 border border-white/5 p-2.5 rounded-xl">
-                                                    <span className="font-bold text-slate-300">{displayKey}</span>
+                                                  <div key={key} className="flex items-center justify-between bg-white border border-slate-200/80 p-2.5 rounded-xl">
+                                                    <span className="font-bold text-slate-800">{displayKey}</span>
                                                     <span className={valColor}>{displayVal}</span>
                                                   </div>
                                                 );
@@ -7370,14 +7601,14 @@ export default function App() {
                       {deletingPatientId && (() => {
                         const targetPat = patients.find(p => p.nationalId === deletingPatientId);
                         return (
-                          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
-                            <div className="bg-[#111625] border border-white/10 rounded-2xl w-full max-w-md p-6 shadow-2xl relative text-center text-right">
-                              <div className="w-12 h-12 bg-rose-500/10 border border-rose-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
-                                <Trash2 className="w-6 h-6 text-rose-400" />
+                          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+                            <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md p-6 shadow-2xl relative text-center text-right text-slate-800">
+                              <div className="w-12 h-12 bg-rose-50 border border-rose-200 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <Trash2 className="w-6 h-6 text-rose-600" />
                               </div>
-                              <h3 className="text-base font-black text-white mb-2 text-center">حذف پرونده بیمار</h3>
-                              <p className="text-xs text-slate-300 font-medium leading-relaxed mb-6 text-center">
-                                آیا از حذف پرونده بیمار <span className="text-rose-400 font-black">«{targetPat?.name}»</span> با کد ملی {deletingPatientId} اطمینان کامل دارید؟ این اقدام غیرقابل بازگشت است و دسترسی بیمار قطع خواهد شد.
+                              <h3 className="text-base font-black text-slate-900 mb-2 text-center">حذف پرونده بیمار</h3>
+                              <p className="text-xs text-slate-700 font-medium leading-relaxed mb-6 text-center">
+                                آیا از حذف پرونده بیمار <span className="text-rose-700 font-black">«{targetPat?.name}»</span> با کد ملی {deletingPatientId} اطمینان کامل دارید؟ این اقدام غیرقابل بازگشت است و دسترسی بیمار قطع خواهد شد.
                               </p>
                               <div className="flex items-center justify-center gap-3">
                                 <button
@@ -7763,50 +7994,70 @@ export default function App() {
                     const activePatientDisease = activePatientInfo ? diseases.find(d => d.id === activePatientInfo.diseaseId) : null;
 
                     return (
-                      <div className="h-[620px] rounded-3xl border border-white/10 overflow-hidden bg-[#0d121f]/90 flex flex-col md:flex-row shadow-2xl">
+                      <div className="h-[620px] rounded-3xl border border-slate-200 overflow-hidden bg-white flex flex-col md:flex-row shadow-sm">
 
                         {/* Right / List Column: Patients Thread List */}
-                        <div className={`w-full md:w-80 border-l border-white/10 flex flex-col bg-slate-900/40 shrink-0 ${activeChatPatientId ? 'hidden md:flex' : 'flex'}`}>
+                        <div className={`w-full md:w-80 border-l border-slate-200 flex flex-col bg-slate-50 shrink-0 ${activeChatPatientId ? 'hidden md:flex' : 'flex'}`}>
                           {/* Search & Header */}
-                          <div className="p-4 border-b border-white/5 space-y-3">
-                            <h3 className="text-sm font-black text-white flex items-center gap-2">
-                              <MessageSquare className="w-4 h-4 text-sky-400" />
-                              <span>گفتگوهای پزشکی بیماران</span>
-                              {messages.filter(m => !m.answer && (currentAdmin.role === 'super' ? true : m.departmentId === currentAdmin.departmentId)).length > 0 && (
-                                <span className="bg-rose-500 text-white text-[9px] font-black px-2 py-0.5 rounded-full animate-pulse">
-                                  {messages.filter(m => !m.answer && (currentAdmin.role === 'super' ? true : m.departmentId === currentAdmin.departmentId)).length} جدید
-                                </span>
-                              )}
-                            </h3>
+                          <div className="p-4 border-b border-slate-200 space-y-3">
+                            <div className="flex items-center justify-between">
+                              <h3 className="text-sm font-black text-slate-900 flex items-center gap-2">
+                                <MessageSquare className="w-4 h-4 text-sky-600" />
+                                <span>گفتگوهای پزشکی</span>
+                                {messages.filter(m => !m.answer && (currentAdmin.role === 'super' ? true : m.departmentId === currentAdmin.departmentId)).length > 0 && (
+                                  <span className="bg-rose-600 text-white text-[9px] font-black px-2 py-0.5 rounded-full animate-pulse">
+                                    {messages.filter(m => !m.answer && (currentAdmin.role === 'super' ? true : m.departmentId === currentAdmin.departmentId)).length} جدید
+                                  </span>
+                                )}
+                              </h3>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const remoteMsgs = await fetchMessagesFromSupabase();
+                                  if (remoteMsgs) {
+                                    setMessages(prev => {
+                                      const merged = mergeMessageArrays(prev, remoteMsgs);
+                                      safeLocalStorageSet('hospital_messages', JSON.stringify(merged));
+                                      return merged;
+                                    });
+                                  }
+                                }}
+                                className="text-[10px] bg-slate-200 hover:bg-slate-300 text-sky-800 border border-sky-300 px-2.5 py-1 rounded-lg font-bold flex items-center gap-1 cursor-pointer transition-all active:scale-95"
+                                title="بروزرسانی لیست پیام‌ها"
+                              >
+                                <RotateCcw className="w-3 h-3 text-sky-600" />
+                                <span>بروزرسانی</span>
+                              </button>
+                            </div>
 
                             <div className="relative">
-                              <Search className="absolute right-3 top-3 w-3.5 h-3.5 text-slate-500" />
+                              <Search className="absolute right-3 top-3 w-3.5 h-3.5 text-slate-400" />
                               <input
                                 type="text"
                                 placeholder="جستجوی نام یا کدملی..."
                                 value={chatSearchQuery}
                                 onChange={(e) => setChatSearchQuery(e.target.value)}
-                                className="w-full text-[11px] bg-slate-950/60 border border-white/5 text-white placeholder:text-slate-500 rounded-xl pr-9 pl-3 py-2 outline-none focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/20 font-bold"
+                                className="w-full text-[11px] bg-white border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl pr-9 pl-3 py-2 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500/20 font-bold"
                               />
                             </div>
 
                             {/* Filter Tabs */}
-                            <div className="flex gap-1 bg-slate-950/40 p-1 rounded-xl border border-white/5">
+                            <div className="flex gap-1 bg-slate-200/70 p-1 rounded-xl border border-slate-300">
                               <button
                                 onClick={() => setChatFilter('all')}
-                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'all' ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20' : 'text-slate-400 hover:text-white'}`}
+                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'all' ? 'bg-sky-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
                               >
                                 همه ({patientConversations.length})
                               </button>
                               <button
                                 onClick={() => setChatFilter('unanswered')}
-                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'unanswered' ? 'bg-rose-500 text-white shadow-md shadow-rose-500/20' : 'text-slate-400 hover:text-rose-400'}`}
+                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'unanswered' ? 'bg-rose-600 text-white shadow-sm' : 'text-slate-600 hover:text-rose-600'}`}
                               >
                                 بدون پاسخ ({patientConversations.filter((c: any) => c.unansweredCount > 0).length})
                               </button>
                               <button
                                 onClick={() => setChatFilter('answered')}
-                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'answered' ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20' : 'text-slate-400 hover:text-emerald-400'}`}
+                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'answered' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600 hover:text-emerald-700'}`}
                               >
                                 پاسخ‌شده ({patientConversations.filter((c: any) => c.unansweredCount === 0).length})
                               </button>
@@ -7814,7 +8065,7 @@ export default function App() {
                           </div>
 
                           {/* List of Threads */}
-                          <div className="flex-1 overflow-y-auto divide-y divide-white/5">
+                          <div className="flex-1 overflow-y-auto divide-y divide-slate-200">
                             {filteredConvos.map((convo: any) => {
                               const isSelected = convo.patientId === activeChatPatientId;
                               const lastMsg = convo.messages[convo.messages.length - 1];
@@ -7827,28 +8078,28 @@ export default function App() {
                                     setActiveChatPatientId(convo.patientId);
                                     setEditingMsgId(null);
                                   }}
-                                  className={`w-full text-right p-4 transition-all flex flex-col gap-1.5 relative hover:bg-white/5 ${isSelected ? 'bg-sky-500/10 border-r-4 border-sky-400' : ''}`}
+                                  className={`w-full text-right p-4 transition-all flex flex-col gap-1.5 relative hover:bg-slate-100 ${isSelected ? 'bg-sky-50 border-r-4 border-sky-600' : ''}`}
                                 >
                                   <div className="flex justify-between items-center w-full">
-                                    <span className="font-black text-xs text-white block">{convo.patientName}</span>
+                                    <span className="font-black text-xs text-slate-900 block">{convo.patientName}</span>
                                     <span className="text-[9px] text-slate-500 font-mono font-bold">
                                       {new Date(convo.lastAskedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}
                                     </span>
                                   </div>
 
-                                  <div className="text-[10px] text-slate-400 line-clamp-1 flex justify-between items-center w-full gap-2">
+                                  <div className="text-[10px] text-slate-600 line-clamp-1 flex justify-between items-center w-full gap-2">
                                     <span className="truncate">{lastMsg?.answer || lastMsg?.question}</span>
                                     {convo.unansweredCount > 0 ? (
-                                      <span className="bg-rose-500 text-white font-black text-[9px] px-2 py-0.5 rounded-full shrink-0 animate-pulse">
+                                      <span className="bg-rose-600 text-white font-black text-[9px] px-2 py-0.5 rounded-full shrink-0 animate-pulse">
                                         {convo.unansweredCount} جدید
                                       </span>
                                     ) : (
-                                      <CheckCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                      <CheckCircle className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                                     )}
                                   </div>
 
                                   <div className="flex items-center gap-1.5 mt-0.5">
-                                    <span className="text-[9px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded font-black">
+                                    <span className="text-[9px] bg-slate-200 text-slate-700 px-2 py-0.5 rounded font-black">
                                       بخش {dept?.name || 'نامشخص'}
                                     </span>
                                     <span className="text-[9px] font-mono text-slate-500">
@@ -7862,43 +8113,43 @@ export default function App() {
                             {filteredConvos.length === 0 && (
                               <div className="text-center py-16 px-4 text-slate-500 text-xs font-bold space-y-1">
                                 <p>موردی یافت نشد.</p>
-                                <p className="text-[10px] text-slate-600 font-medium">گفتگوی فعالی با شرایط فیلتر شما وجود ندارد.</p>
+                                <p className="text-[10px] text-slate-500 font-medium">گفتگوی فعالی با شرایط فیلتر شما وجود ندارد.</p>
                               </div>
                             )}
                           </div>
                         </div>
 
                         {/* Left / Active Chat Conversation Window */}
-                        <div className={`flex-1 flex flex-col bg-[#0b0e17] ${!activeChatPatientId ? 'hidden md:flex items-center justify-center' : 'flex'}`}>
+                        <div className={`flex-1 flex flex-col bg-slate-50/70 ${!activeChatPatientId ? 'hidden md:flex items-center justify-center' : 'flex'}`}>
                           {activeChatPatientId && activeConvo ? (
                             <>
                               {/* Active Chat Header */}
-                              <div className="px-5 py-4 border-b border-white/10 bg-slate-900/20 flex justify-between items-center">
+                              <div className="px-5 py-4 border-b border-slate-200 bg-white flex justify-between items-center">
                                 <div className="flex items-center gap-3">
                                   <button
                                     onClick={() => setActiveChatPatientId(null)}
-                                    className="md:hidden text-slate-400 hover:text-white bg-white/5 border border-white/10 p-2 rounded-xl"
+                                    className="md:hidden text-slate-600 hover:text-slate-900 bg-slate-100 border border-slate-200 p-2 rounded-xl"
                                   >
                                     <ArrowRight className="w-4 h-4" />
                                   </button>
                                   <div>
                                     <div className="flex items-center gap-2">
-                                      <h4 className="font-black text-white text-sm">{activeConvo.patientName}</h4>
-                                      <span className="text-[10px] font-mono bg-sky-500/10 text-sky-300 border border-sky-500/20 px-2.5 py-0.5 rounded-full font-black">
+                                      <h4 className="font-black text-slate-900 text-sm">{activeConvo.patientName}</h4>
+                                      <span className="text-[10px] font-mono bg-sky-50 text-sky-800 border border-sky-200 px-2.5 py-0.5 rounded-full font-black">
                                         پرونده {activePatientInfo?.fileNumber || 'نامشخص'}
                                       </span>
                                     </div>
-                                    <div className="text-[10px] text-slate-400 flex items-center gap-2.5 mt-1 font-bold">
+                                    <div className="text-[10px] text-slate-500 flex items-center gap-2.5 mt-1 font-bold">
                                       <span>سن: {activePatientInfo?.age} سال</span>
-                                      <span className="text-slate-600">|</span>
-                                      <span>بیماری: <span className="text-sky-300">{activePatientDisease?.name || 'نامشخص'}</span></span>
+                                      <span className="text-slate-300">|</span>
+                                      <span>بیماری: <span className="text-sky-700">{activePatientDisease?.name || 'نامشخص'}</span></span>
                                     </div>
                                   </div>
                                 </div>
 
                                 <div className="hidden sm:flex items-center gap-2 text-xs">
-                                  <span className="text-slate-400">آخرین بروزرسانی:</span>
-                                  <span className="text-slate-200 font-mono font-black">
+                                  <span className="text-slate-500">آخرین بروزرسانی:</span>
+                                  <span className="text-slate-700 font-mono font-black">
                                     {new Date(activeConvo.lastAskedAt).toLocaleDateString('fa-IR')}
                                   </span>
                                 </div>
@@ -7914,21 +8165,21 @@ export default function App() {
                                       {/* Patient Message (Question Bubble) */}
                                       {isPatientMsg && (
                                         <div className="flex items-start gap-2.5 max-w-[85%] md:max-w-[70%]">
-                                          <div className="bg-slate-850 border border-white/10 p-4 rounded-2xl rounded-tr-none text-slate-100 shadow-lg space-y-2.5 w-full">
-                                            <div className="flex justify-between items-center text-[10px] text-slate-400 font-bold border-b border-white/5 pb-1.5 mb-1">
+                                          <div className="bg-white border border-slate-200 p-4 rounded-2xl rounded-tr-none text-slate-800 shadow-sm space-y-2.5 w-full">
+                                            <div className="flex justify-between items-center text-[10px] text-slate-500 font-bold border-b border-slate-100 pb-1.5 mb-1">
                                               <span>{msg.patientName} (بیمار)</span>
                                               <span className="font-mono">{new Date(msg.askedAt).toLocaleDateString('fa-IR')} | {new Date(msg.askedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}</span>
                                             </div>
-                                            <p className="text-xs font-bold leading-relaxed whitespace-pre-wrap text-justify">{msg.question}</p>
+                                            <p className="text-xs font-bold leading-relaxed whitespace-pre-wrap text-justify text-slate-800">{msg.question}</p>
 
                                             {msg.patientFileName && msg.patientFileUrl && (
-                                              <div className="flex items-center gap-2 bg-slate-900 border border-white/5 p-2 rounded-xl mt-2 w-full">
-                                                <Paperclip className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                                                <span className="text-[10px] text-slate-300 font-black truncate flex-1">{msg.patientFileName}</span>
+                                              <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 p-2 rounded-xl mt-2 w-full">
+                                                <Paperclip className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                                                <span className="text-[10px] text-slate-700 font-black truncate flex-1">{msg.patientFileName}</span>
                                                 <a
                                                   href={msg.patientFileUrl}
                                                   download={msg.patientFileName}
-                                                  className="bg-sky-500/20 hover:bg-sky-500/35 border border-sky-400/30 text-sky-300 text-[9px] px-2.5 py-1.5 rounded-lg font-black transition-all"
+                                                  className="bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 text-[9px] px-2.5 py-1.5 rounded-lg font-black transition-all"
                                                 >
                                                   دانلود
                                                 </a>
@@ -7941,21 +8192,21 @@ export default function App() {
                                       {/* Doctor Answer Bubble */}
                                       {msg.answer ? (
                                         <div className="flex items-start gap-2.5 max-w-[85%] md:max-w-[70%] mr-auto justify-end">
-                                          <div className="bg-gradient-to-br from-[#1a3a30] to-[#0c221a] border border-emerald-500/30 p-4 rounded-2xl rounded-tl-none text-emerald-100 shadow-xl space-y-2.5 w-full">
+                                          <div className="bg-emerald-50/90 border border-emerald-200 p-4 rounded-2xl rounded-tl-none text-emerald-950 shadow-sm space-y-2.5 w-full">
 
                                             {/* Edit view inside message bubble */}
                                             {editingMsgId === msg.id ? (
                                               <div className="space-y-3">
-                                                <span className="text-[10px] text-emerald-300 font-black block">ویرایش پاسخ پزشک:</span>
+                                                <span className="text-[10px] text-emerald-800 font-black block">ویرایش پاسخ پزشک:</span>
                                                 <textarea
                                                   rows={3}
                                                   value={editingMsgText}
                                                   onChange={(e) => setEditingMsgText(e.target.value)}
-                                                  className="w-full text-xs bg-slate-900/80 border border-emerald-500/30 rounded-xl p-2.5 text-white outline-none focus:ring-1 focus:ring-emerald-500 font-bold"
+                                                  className="w-full text-xs bg-white border border-emerald-300 rounded-xl p-2.5 text-slate-800 outline-none focus:ring-1 focus:ring-emerald-500 font-bold"
                                                 />
 
                                                 <div className="flex flex-wrap items-center gap-3">
-                                                  <label className="flex items-center gap-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 px-3 py-1.5 rounded-lg text-[9px] font-black text-emerald-200 cursor-pointer transition-all">
+                                                  <label className="flex items-center gap-1.5 bg-emerald-100/70 hover:bg-emerald-100 border border-emerald-300 px-3 py-1.5 rounded-lg text-[9px] font-black text-emerald-900 cursor-pointer transition-all">
                                                     <Paperclip className="w-3.5 h-3.5" />
                                                     <span>ویرایش فایل ضمیمه</span>
                                                     <input
@@ -7966,17 +8217,17 @@ export default function App() {
                                                   </label>
 
                                                   {editingMsgFile ? (
-                                                    <div className="flex items-center gap-1 bg-slate-950/50 text-emerald-300 text-[9px] px-2 py-1 rounded-md border border-emerald-500/20">
+                                                    <div className="flex items-center gap-1 bg-white text-emerald-900 text-[9px] px-2 py-1 rounded-md border border-emerald-300">
                                                       <span className="font-bold max-w-[120px] truncate">{editingMsgFile.name}</span>
                                                       <button
                                                         onClick={() => setEditingMsgFile(null)}
-                                                        className="text-rose-400 hover:text-rose-300 font-black px-1"
+                                                        className="text-rose-600 hover:text-rose-700 font-black px-1"
                                                       >
                                                         ✕
                                                       </button>
                                                     </div>
                                                   ) : msg.adminFileName ? (
-                                                    <div className="flex items-center gap-1 bg-slate-950/30 text-emerald-300/80 text-[9px] px-2 py-1 rounded-md">
+                                                    <div className="flex items-center gap-1 bg-white text-emerald-800 text-[9px] px-2 py-1 rounded-md">
                                                       <span className="max-w-[120px] truncate">{msg.adminFileName}</span>
                                                     </div>
                                                   ) : null}
@@ -7985,13 +8236,13 @@ export default function App() {
                                                 <div className="flex gap-2 justify-end pt-1">
                                                   <button
                                                     onClick={() => setEditingMsgId(null)}
-                                                    className="px-3 py-1.5 rounded-lg text-[10px] bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 font-bold cursor-pointer"
+                                                    className="px-3 py-1.5 rounded-lg text-[10px] bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold cursor-pointer"
                                                   >
                                                     انصراف
                                                   </button>
                                                   <button
                                                     onClick={() => handleSaveEditedMessage(msg.id)}
-                                                    className="px-4 py-1.5 rounded-lg text-[10px] bg-emerald-500 text-white font-black cursor-pointer shadow-lg shadow-emerald-500/20 hover:bg-emerald-600 transition-all"
+                                                    className="px-4 py-1.5 rounded-lg text-[10px] bg-emerald-600 text-white font-black cursor-pointer shadow-md hover:bg-emerald-700 transition-all"
                                                   >
                                                     ذخیره تغییرات
                                                   </button>
@@ -7999,7 +8250,7 @@ export default function App() {
                                               </div>
                                             ) : (
                                               <>
-                                                <div className="flex justify-between items-center text-[10px] text-emerald-300/80 font-bold border-b border-emerald-500/10 pb-1.5 mb-1">
+                                                <div className="flex justify-between items-center text-[10px] text-emerald-800 font-bold border-b border-emerald-200 pb-1.5 mb-1">
                                                   <span>{msg.answeredBy} (پاسخ دهنده)</span>
                                                   <div className="flex items-center gap-2">
                                                     <button
@@ -8008,7 +8259,7 @@ export default function App() {
                                                         setEditingMsgText(msg.answer || '');
                                                         setEditingMsgFile(msg.adminFileName && msg.adminFileUrl ? { name: msg.adminFileName, url: msg.adminFileUrl } : null);
                                                       }}
-                                                      className="text-sky-300 hover:text-sky-200 bg-white/5 px-2 py-0.5 rounded border border-white/5 text-[9px] cursor-pointer"
+                                                      className="text-sky-700 hover:text-sky-800 bg-white border border-sky-200 px-2 py-0.5 rounded text-[9px] cursor-pointer font-black"
                                                     >
                                                       ویرایش
                                                     </button>
@@ -8016,16 +8267,16 @@ export default function App() {
                                                   </div>
                                                 </div>
 
-                                                <p className="text-xs font-bold leading-relaxed whitespace-pre-wrap text-justify">{msg.answer}</p>
+                                                <p className="text-xs font-bold leading-relaxed whitespace-pre-wrap text-justify text-slate-900">{msg.answer}</p>
 
                                                 {msg.adminFileName && msg.adminFileUrl && (
-                                                  <div className="flex items-center gap-2 bg-emerald-950/40 border border-emerald-500/20 p-2 rounded-xl mt-2 w-full">
-                                                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                                                    <span className="text-[10px] text-emerald-300 font-black truncate flex-1">{msg.adminFileName}</span>
+                                                  <div className="flex items-center gap-2 bg-white border border-emerald-200 p-2 rounded-xl mt-2 w-full">
+                                                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                                    <span className="text-[10px] text-emerald-900 font-black truncate flex-1">{msg.adminFileName}</span>
                                                     <a
                                                       href={msg.adminFileUrl}
                                                       download={msg.adminFileName}
-                                                      className="bg-emerald-500/20 hover:bg-emerald-500/35 border border-emerald-400/30 text-emerald-200 text-[9px] px-2.5 py-1.5 rounded-lg font-black transition-all"
+                                                      className="bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 text-emerald-800 text-[9px] px-2.5 py-1.5 rounded-lg font-black transition-all"
                                                     >
                                                       دانلود پیوست
                                                     </a>
@@ -8043,18 +8294,18 @@ export default function App() {
                               </div>
 
                               {/* Active Chat Input Composer */}
-                              <div className="p-4 border-t border-white/10 bg-slate-900/30 space-y-3">
+                              <div className="p-4 border-t border-slate-200 bg-white space-y-3">
 
                                 {/* Replying state alert indicator */}
                                 {(() => {
                                   const unanswered = sortedChatMessages.find(m => !m.answer);
                                   return unanswered ? (
-                                    <div className="bg-amber-500/10 border border-amber-500/20 text-amber-200 rounded-xl px-3 py-2 text-[10px] font-black flex items-center justify-between">
+                                    <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-xl px-3 py-2 text-[10px] font-black flex items-center justify-between">
                                       <span>پاسخ به سوال بیمار: "{unanswered.question.substring(0, 50)}..."</span>
-                                      <span className="text-amber-400">بخش: {departments.find(d => d.id === unanswered.departmentId)?.name}</span>
+                                      <span className="text-amber-800">بخش: {departments.find(d => d.id === unanswered.departmentId)?.name}</span>
                                     </div>
                                   ) : (
-                                    <div className="bg-sky-500/10 border border-sky-500/20 text-sky-200 rounded-xl px-3 py-2 text-[10px] font-black">
+                                    <div className="bg-sky-50 border border-sky-200 text-sky-900 rounded-xl px-3 py-2 text-[10px] font-black">
                                       بیمار سوال بدون پاسخی ندارد. در صورت تمایل می‌توانید یادداشت جدیدی جهت پیگیری روند درمان ارسال کنید.
                                     </div>
                                   );
@@ -8062,13 +8313,13 @@ export default function App() {
 
                                 {/* Attached composer file preview */}
                                 {chatInputFile && (
-                                  <div className="flex items-center gap-2 bg-emerald-500/10 text-emerald-300 text-[10px] px-3.5 py-2 rounded-xl border border-emerald-500/20 w-fit">
-                                    <FileSpreadsheet className="w-4 h-4 shrink-0" />
+                                  <div className="flex items-center gap-2 bg-emerald-50 text-emerald-800 text-[10px] px-3.5 py-2 rounded-xl border border-emerald-200 w-fit">
+                                    <FileSpreadsheet className="w-4 h-4 shrink-0 text-emerald-600" />
                                     <span className="font-bold max-w-[200px] truncate">{chatInputFile.name}</span>
                                     <button
                                       type="button"
                                       onClick={() => setChatInputFile(null)}
-                                      className="text-rose-400 hover:text-rose-300 font-black cursor-pointer px-1"
+                                      className="text-rose-600 hover:text-rose-700 font-black cursor-pointer px-1"
                                     >
                                       ✕
                                     </button>
@@ -8077,13 +8328,13 @@ export default function App() {
 
                                 {/* Main Text Input Bar */}
                                 <div className="flex gap-3 items-end">
-                                  <div className="flex-1 bg-slate-950/80 border border-white/10 rounded-2xl p-2 focus-within:border-sky-500/50 flex flex-col gap-1">
+                                  <div className="flex-1 bg-slate-50 border border-slate-300 rounded-2xl p-2 focus-within:border-sky-500 focus-within:bg-white transition-all flex flex-col gap-1">
                                     <textarea
                                       rows={2}
                                       value={chatInputText}
                                       onChange={(e) => setChatInputText(e.target.value)}
                                       placeholder="پیام یا دستورالعمل مراقبتی خود را بنویسید..."
-                                      className="w-full text-xs bg-transparent border-none text-white placeholder:text-slate-500 resize-none outline-none font-bold p-1 leading-relaxed"
+                                      className="w-full text-xs bg-transparent border-none text-slate-800 placeholder:text-slate-400 resize-none outline-none font-bold p-1 leading-relaxed"
                                       onKeyDown={(e) => {
                                         if (e.key === 'Enter' && !e.shiftKey) {
                                           e.preventDefault();
@@ -8092,10 +8343,10 @@ export default function App() {
                                       }}
                                     />
 
-                                    <div className="flex justify-between items-center pt-1 border-t border-white/5">
+                                    <div className="flex justify-between items-center pt-1 border-t border-slate-200">
                                       {/* File Attachment Trigger Button */}
-                                      <label className="flex items-center gap-1.5 hover:bg-white/5 px-2.5 py-1.5 rounded-lg text-[10px] font-black text-slate-400 hover:text-slate-200 cursor-pointer transition-all">
-                                        <Paperclip className="w-3.5 h-3.5" />
+                                      <label className="flex items-center gap-1.5 hover:bg-slate-200 px-2.5 py-1.5 rounded-lg text-[10px] font-black text-slate-600 hover:text-slate-900 cursor-pointer transition-all">
+                                        <Paperclip className="w-3.5 h-3.5 text-slate-500" />
                                         <span>افزودن فایل / دستورالعمل</span>
                                         <input
                                           type="file"
@@ -8104,13 +8355,13 @@ export default function App() {
                                         />
                                       </label>
 
-                                      <span className="text-[9px] text-slate-600 font-mono">Shift+Enter برای خط جدید</span>
+                                      <span className="text-[9px] text-slate-400 font-mono">Shift+Enter برای خط جدید</span>
                                     </div>
                                   </div>
 
                                   <button
                                     onClick={handleSendChatMessage}
-                                    className="bg-gradient-to-r from-sky-400 to-blue-500 hover:from-sky-500 hover:to-blue-600 text-white font-black text-xs px-5 py-3.5 rounded-2xl shadow-lg shadow-blue-500/10 hover:shadow-blue-500/20 transition-all flex items-center gap-2 cursor-pointer h-[50px]"
+                                    className="bg-sky-600 hover:bg-sky-700 text-white font-black text-xs px-5 py-3.5 rounded-2xl shadow-sm transition-all flex items-center gap-2 cursor-pointer h-[50px]"
                                   >
                                     <span>ارسال</span>
                                     <Send className="w-4 h-4 transform rotate-180 shrink-0" />
@@ -8122,12 +8373,12 @@ export default function App() {
                           ) : (
                             /* Chat Welcome / Empty State Placeholder */
                             <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4">
-                              <div className="w-20 h-20 bg-sky-500/5 border border-sky-500/10 rounded-full flex items-center justify-center text-sky-400 animate-bounce">
+                              <div className="w-20 h-20 bg-sky-50 border border-sky-200 rounded-full flex items-center justify-center text-sky-600 animate-bounce">
                                 <MessageSquare className="w-10 h-10" />
                               </div>
                               <div className="max-w-md space-y-2">
-                                <h4 className="text-base font-black text-white">انتخاب پزشک پیگیری کننده</h4>
-                                <p className="text-xs text-slate-400 leading-relaxed font-medium">
+                                <h4 className="text-base font-black text-slate-900">انتخاب گفتگو</h4>
+                                <p className="text-xs text-slate-600 leading-relaxed font-medium">
                                   برای نمایش پیام‌ها، فایل‌های پیوستی ارسالی بیماران، و ثبت دستورالعمل‌های درمانی و پمفلت‌ها، لطفاً یک بیمار را از لیست سمت راست انتخاب نمایید.
                                 </p>
                               </div>
@@ -8307,17 +8558,17 @@ export default function App() {
                         <div className="space-y-6">
                           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
                             <div>
-                              <h3 className="text-xl font-black text-white mb-1.5 flex items-center gap-2">
-                                <BookOpen className="w-6 h-6 text-sky-400 animate-pulse" />
+                              <h3 className="text-xl font-black text-slate-900 mb-1.5 flex items-center gap-2">
+                                <BookOpen className="w-6 h-6 text-sky-600 animate-pulse" />
                                 <span>مدیریت مطالب آموزشی و بخش‌های بیمارستان</span>
                               </h3>
-                              <p className="text-xs text-slate-300 font-medium">بخش مورد نظر خود را جهت حذف، اضافه و ویرایش بیماری‌ها و راهنماهای ترخیص انتخاب نمایید.</p>
+                              <p className="text-xs text-slate-600 font-medium">بخش مورد نظر خود را جهت حذف، اضافه و ویرایش بیماری‌ها و راهنماهای ترخیص انتخاب نمایید.</p>
                             </div>
 
                             {currentAdmin.role === 'super' && (
                               <button
                                 onClick={() => setIsAddingDept(!isAddingDept)}
-                                className="bg-gradient-to-r from-sky-400 to-blue-500 hover:from-sky-500 hover:to-blue-600 text-white font-black text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 transition-all cursor-pointer shrink-0"
+                                className="bg-sky-600 hover:bg-sky-700 text-white font-black text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 transition-all cursor-pointer shrink-0 shadow-sm"
                               >
                                 <Plus className="w-4 h-4" />
                                 <span>افزودن بخش جدید</span>
@@ -8327,38 +8578,38 @@ export default function App() {
 
                           {/* Add Department Form Panel */}
                           {isAddingDept && currentAdmin.role === 'super' && (
-                            <form onSubmit={handleCreateDepartmentSubmit} className="bg-white/5 border border-white/10 p-5 rounded-2xl max-w-xl space-y-4 shadow-xl">
-                              <h4 className="text-xs font-black text-slate-200 border-b border-white/5 pb-2">ثبت مشخصات بخش درمانی جدید</h4>
+                            <form onSubmit={handleCreateDepartmentSubmit} className="bg-slate-50 border border-slate-200 p-5 rounded-2xl max-w-xl space-y-4 shadow-sm">
+                              <h4 className="text-xs font-black text-slate-800 border-b border-slate-200 pb-2">ثبت مشخصات بخش درمانی جدید</h4>
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div>
-                                  <label className="block text-[10px] text-slate-400 font-bold mb-1.5">نام فارسی بخش:</label>
+                                  <label className="block text-[10px] text-slate-600 font-bold mb-1.5">نام فارسی بخش:</label>
                                   <input
                                     type="text"
                                     required
                                     placeholder="مثال: جراحی قلب"
                                     value={newDeptName}
                                     onChange={(e) => setNewDeptName(e.target.value)}
-                                    className="w-full text-xs bg-slate-950/60 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-3 py-2.5 outline-none focus:border-sky-500/50 font-bold"
+                                    className="w-full text-xs bg-white border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl px-3 py-2.5 outline-none focus:border-sky-500 font-bold"
                                   />
                                 </div>
                                 <div>
-                                  <label className="block text-[10px] text-slate-400 font-bold mb-1.5">شناسه انگلیسی (کد بخش):</label>
+                                  <label className="block text-[10px] text-slate-600 font-bold mb-1.5">شناسه انگلیسی (کد بخش):</label>
                                   <input
                                     type="text"
                                     required
                                     placeholder="مثال: cardiology"
                                     value={newDeptEnglishId}
                                     onChange={(e) => setNewDeptEnglishId(e.target.value)}
-                                    className="w-full text-xs bg-slate-950/60 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-3 py-2.5 outline-none focus:border-sky-500/50 font-bold font-mono"
+                                    className="w-full text-xs bg-white border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl px-3 py-2.5 outline-none focus:border-sky-500 font-bold font-mono"
                                   />
                                 </div>
                               </div>
                               <div>
-                                <label className="block text-[10px] text-slate-400 font-bold mb-1.5">ایموجی / آیکون کاشی بخش درمانی:</label>
+                                <label className="block text-[10px] text-slate-600 font-bold mb-1.5">ایموجی / آیکون کاشی بخش درمانی:</label>
                                 <EmojiPickerGrid selectedEmoji={newDeptEmoji} onSelectEmoji={setNewDeptEmoji} />
                               </div>
                               <div>
-                                <label className="block text-[10px] text-slate-400 font-bold mb-2">رنگ کارت بخش درمانی:</label>
+                                <label className="block text-[10px] text-slate-600 font-bold mb-2">رنگ کارت بخش درمانی:</label>
                                 <div className="grid grid-cols-5 gap-2 sm:grid-cols-9">
                                   {Object.entries(COLOR_MAP).map(([key, value]) => {
                                     const isSelected = newDeptColor === key;
@@ -8369,8 +8620,8 @@ export default function App() {
                                         onClick={() => setNewDeptColor(key)}
                                         className={`flex flex-col items-center gap-1 p-2 rounded-xl border transition-all cursor-pointer ${
                                           isSelected
-                                            ? 'bg-white/10 border-sky-400 text-sky-400 font-black shadow-lg shadow-sky-500/10'
-                                            : 'bg-transparent border-white/5 text-slate-400 hover:bg-white/5 hover:border-white/15'
+                                            ? 'bg-sky-50 border-sky-600 text-sky-800 font-black shadow-sm'
+                                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100 hover:border-slate-300'
                                         }`}
                                       >
                                         <span className={`w-3.5 h-3.5 rounded-full bg-gradient-to-br ${
@@ -8394,13 +8645,13 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => setIsAddingDept(false)}
-                                  className="text-xs text-slate-400 bg-white/5 border border-white/10 hover:bg-white/10 px-4 py-2 rounded-xl font-bold cursor-pointer"
+                                  className="text-xs text-slate-600 bg-slate-200 border border-slate-300 hover:bg-slate-300 px-4 py-2 rounded-xl font-bold cursor-pointer"
                                 >
                                   انصراف
                                 </button>
                                 <button
                                   type="submit"
-                                  className="text-xs text-white bg-sky-500 hover:bg-sky-600 px-5 py-2 rounded-xl font-black cursor-pointer shadow-lg shadow-sky-500/15"
+                                  className="text-xs text-white bg-sky-600 hover:bg-sky-700 px-5 py-2 rounded-xl font-black cursor-pointer shadow-sm"
                                 >
                                   ثبت بخش جدید
                                 </button>
@@ -8410,40 +8661,40 @@ export default function App() {
 
                           {/* Edit Department Form Panel */}
                           {editingDeptId && (
-                            <form onSubmit={handleUpdateDepartmentSubmit} className="bg-slate-900/90 border border-sky-500/40 p-5 rounded-2xl max-w-xl space-y-4 shadow-2xl backdrop-blur-md relative">
-                              <div className="flex items-center justify-between border-b border-white/10 pb-2">
-                                <h4 className="text-xs font-black text-sky-400 flex items-center gap-2">
+                            <form onSubmit={handleUpdateDepartmentSubmit} className="bg-white border border-sky-300 p-5 rounded-2xl max-w-xl space-y-4 shadow-md relative">
+                              <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                                <h4 className="text-xs font-black text-sky-800 flex items-center gap-2">
                                   <Edit3 className="w-4 h-4" />
                                   <span>ویرایش کاشی و مشخصات بخش: {editingDeptName}</span>
                                 </h4>
                                 <button
                                   type="button"
                                   onClick={() => setEditingDeptId(null)}
-                                  className="text-slate-400 hover:text-white text-xs font-bold px-2 py-1 rounded-lg hover:bg-white/10 cursor-pointer"
+                                  className="text-slate-500 hover:text-slate-800 text-xs font-bold px-2 py-1 rounded-lg hover:bg-slate-100 cursor-pointer"
                                 >
                                   انصراف
                                 </button>
                               </div>
 
                               <div>
-                                <label className="block text-[10px] text-slate-400 font-bold mb-1.5">نام فارسی بخش:</label>
+                                <label className="block text-[10px] text-slate-600 font-bold mb-1.5">نام فارسی بخش:</label>
                                 <input
                                   type="text"
                                   required
                                   placeholder="مثال: جراحی قلب"
                                   value={editingDeptName}
                                   onChange={(e) => setEditingDeptName(e.target.value)}
-                                  className="w-full text-xs bg-slate-950/60 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-3 py-2.5 outline-none focus:border-sky-500/50 font-bold"
+                                  className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl px-3 py-2.5 outline-none focus:border-sky-500 font-bold"
                                 />
                               </div>
 
                               <div>
-                                <label className="block text-[10px] text-slate-400 font-bold mb-1.5">ایموجی / آیکون کاشی بخش درمانی:</label>
+                                <label className="block text-[10px] text-slate-600 font-bold mb-1.5">ایموجی / آیکون کاشی بخش درمانی:</label>
                                 <EmojiPickerGrid selectedEmoji={editingDeptEmoji} onSelectEmoji={setEditingDeptEmoji} />
                               </div>
 
                               <div>
-                                <label className="block text-[10px] text-slate-400 font-bold mb-2">رنگ کارت/کاشی بخش درمانی:</label>
+                                <label className="block text-[10px] text-slate-600 font-bold mb-2">رنگ کارت/کاشی بخش درمانی:</label>
                                 <div className="grid grid-cols-5 gap-2 sm:grid-cols-9">
                                   {Object.entries(COLOR_MAP).map(([key, value]) => {
                                     const isSelected = editingDeptColor === key;
@@ -8454,8 +8705,8 @@ export default function App() {
                                         onClick={() => setEditingDeptColor(key)}
                                         className={`flex flex-col items-center gap-1 p-2 rounded-xl border transition-all cursor-pointer ${
                                           isSelected
-                                            ? 'bg-white/10 border-sky-400 text-sky-400 font-black shadow-lg shadow-sky-500/10'
-                                            : 'bg-transparent border-white/5 text-slate-400 hover:bg-white/5 hover:border-white/15'
+                                            ? 'bg-sky-50 border-sky-600 text-sky-800 font-black shadow-sm'
+                                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100 hover:border-slate-300'
                                         }`}
                                       >
                                         <span className={`w-3.5 h-3.5 rounded-full bg-gradient-to-br ${
@@ -8480,13 +8731,13 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => setEditingDeptId(null)}
-                                  className="text-xs text-slate-400 bg-white/5 border border-white/10 hover:bg-white/10 px-4 py-2 rounded-xl font-bold cursor-pointer"
+                                  className="text-xs text-slate-600 bg-slate-200 border border-slate-300 hover:bg-slate-300 px-4 py-2 rounded-xl font-bold cursor-pointer"
                                 >
                                   انصراف
                                 </button>
                                 <button
                                   type="submit"
-                                  className="text-xs text-white bg-sky-500 hover:bg-sky-600 px-5 py-2 rounded-xl font-black cursor-pointer shadow-lg shadow-sky-500/15 flex items-center gap-1.5"
+                                  className="text-xs text-white bg-sky-600 hover:bg-sky-700 px-5 py-2 rounded-xl font-black cursor-pointer shadow-sm flex items-center gap-1.5"
                                 >
                                   <Check className="w-4 h-4" />
                                   <span>ذخیره تغییرات بخش</span>
@@ -8504,17 +8755,17 @@ export default function App() {
                               return (
                                 <div
                                   key={dept.id}
-                                  className={`relative group rounded-3xl border bg-gradient-to-br p-6 shadow-xl transition-all duration-300 hover:shadow-2xl hover:-translate-y-1 ${style.adminBg} ${style.adminBorder} ${style.adminText} overflow-hidden`}
+                                  className={`relative group rounded-3xl border ${style.bg} ${style.textColor} p-6 shadow-sm transition-all duration-300 hover:shadow-md hover:-translate-y-1 overflow-hidden`}
                                 >
                                   <div className="flex justify-between items-start">
                                     <div className="space-y-1.5 flex-1">
                                       <div className="flex items-center gap-2">
-                                        <div className="p-2 rounded-xl bg-white/5 border border-white/10">
+                                        <div className={`p-2 rounded-xl border ${style.iconBg}`}>
                                           <DepartmentIcon id={dept.id} emoji={dept.emoji} className="w-5 h-5 shrink-0" />
                                         </div>
                                         <span className="font-mono text-[10px] uppercase text-slate-500 tracking-wider">{dept.id}</span>
                                       </div>
-                                      <h4 className="text-base font-black text-white group-hover:text-sky-300 transition-colors pt-1">{dept.name}</h4>
+                                      <h4 className="text-base font-black text-slate-900 group-hover:text-sky-700 transition-colors pt-1">{dept.name}</h4>
                                     </div>
                                     {/* Action buttons (Edit & Delete department) */}
                                     <div className="flex items-center gap-1">
@@ -8528,7 +8779,7 @@ export default function App() {
                                             setEditingDeptColor(dept.color || 'blue');
                                             setEditingDeptEmoji(dept.emoji || '🏥');
                                           }}
-                                          className="p-2 rounded-xl text-sky-400 hover:text-white hover:bg-sky-500/20 border border-white/5 cursor-pointer transition-colors"
+                                          className="p-2 rounded-xl text-sky-700 hover:text-sky-900 hover:bg-sky-100 border border-slate-200 cursor-pointer transition-colors"
                                           title="ویرایش کاشی، ایموجی و رنگ بخش"
                                         >
                                           <Edit3 className="w-4 h-4" />
@@ -8541,7 +8792,7 @@ export default function App() {
                                             e.stopPropagation();
                                             handleDeleteDepartmentClick(dept.id, dept.name);
                                           }}
-                                          className="p-2 rounded-xl text-rose-400 hover:text-white hover:bg-rose-500/20 border border-white/5 cursor-pointer transition-colors"
+                                          className="p-2 rounded-xl text-rose-600 hover:text-rose-800 hover:bg-rose-100 border border-slate-200 cursor-pointer transition-colors"
                                           title="حذف کامل این بخش درمانی"
                                         >
                                           <Trash2 className="w-4 h-4" />
@@ -8550,12 +8801,12 @@ export default function App() {
                                     </div>
                                   </div>
 
-                                  <div className="flex justify-between items-center mt-6 border-t border-white/5 pt-4">
-                                    <span className="text-[10px] text-slate-400 font-bold">{deptDiseasesCount} بیماری ثبت شده</span>
+                                  <div className="flex justify-between items-center mt-6 border-t border-slate-200/80 pt-4">
+                                    <span className="text-[10px] text-slate-600 font-bold">{deptDiseasesCount} بیماری ثبت شده</span>
 
                                     <button
                                       onClick={() => setSelectedEduDeptId(dept.id)}
-                                      className="flex items-center gap-1.5 text-xs font-black bg-white/5 border border-white/10 px-4 py-2 rounded-xl hover:bg-white/15 text-slate-200 cursor-pointer transition-all"
+                                      className="flex items-center gap-1.5 text-xs font-black bg-white border border-slate-200 px-4 py-2 rounded-xl hover:bg-slate-50 text-slate-800 cursor-pointer transition-all shadow-sm"
                                     >
                                       <span>مدیریت بیماری‌ها</span>
                                       <ArrowRight className="w-3.5 h-3.5 transform rotate-180" />
@@ -8577,7 +8828,7 @@ export default function App() {
                     return (
                       <div className="space-y-6 w-full max-w-full overflow-hidden">
                         {/* Header & Back Breadcrumb */}
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/10 pb-5">
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-5">
                           <div className="space-y-2">
                             <button
                               type="button"
@@ -8590,17 +8841,17 @@ export default function App() {
                                   setEditingDiseaseId(null);
                                 }
                               }}
-                              className="inline-flex items-center gap-1.5 text-xs text-sky-400 hover:text-sky-300 font-black cursor-pointer bg-sky-500/10 hover:bg-sky-500/15 border border-sky-400/20 px-3.5 py-2 rounded-xl transition-all"
+                              className="inline-flex items-center gap-1.5 text-xs text-sky-800 hover:text-sky-900 font-black cursor-pointer bg-sky-50 hover:bg-sky-100 border border-sky-200 px-3.5 py-2 rounded-xl transition-all"
                             >
                               <ArrowRight className="w-4 h-4" />
                               <span>{viewingDiseaseId ? `بازگشت به لیست بیماری‌های بخش ${deptObj?.name}` : 'بازگشت به لیست تمامی بخش‌ها'}</span>
                             </button>
 
                             <div className="flex items-center gap-2.5 pt-1 flex-wrap">
-                              <h3 className="text-lg md:text-xl font-black text-white flex items-center gap-2">
+                              <h3 className="text-lg md:text-xl font-black text-slate-900 flex items-center gap-2">
                                 <span>آموزش‌های بخش {deptObj?.name}</span>
                               </h3>
-                              <span className="bg-slate-800 text-slate-300 border border-white/10 text-[10px] px-2.5 py-1 rounded-md font-mono">{selectedEduDeptId}</span>
+                              <span className="bg-slate-100 text-slate-700 border border-slate-200 text-[10px] px-2.5 py-1 rounded-md font-mono">{selectedEduDeptId}</span>
                             </div>
                           </div>
 
@@ -8615,7 +8866,7 @@ export default function App() {
                                 setDiseaseFormAttachmentImages([]);
                                 setIsAddingDisease(true);
                               }}
-                              className="bg-gradient-to-r from-emerald-400 to-teal-500 hover:from-emerald-500 hover:to-teal-600 text-white font-black text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 transition-all cursor-pointer shrink-0 shadow-lg shadow-emerald-500/15"
+                              className="bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 transition-all cursor-pointer shrink-0 shadow-sm"
                             >
                               <Plus className="w-4 h-4" />
                               <span>افزودن بیماری جدید به این بخش</span>
@@ -8627,18 +8878,18 @@ export default function App() {
                         {currentViewingDisease ? (
                           <div className="space-y-6 animate-fadeIn">
                             {/* Disease Title Header Banner */}
-                            <div className="bg-[#111625] border border-white/10 p-6 md:p-8 rounded-3xl space-y-4 shadow-xl text-right relative overflow-hidden">
-                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/10 pb-4">
+                            <div className="bg-white border border-slate-200 p-6 md:p-8 rounded-3xl space-y-4 shadow-sm text-right relative overflow-hidden">
+                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-4">
                                 <div className="space-y-2 min-w-0">
                                   <div className="flex items-center gap-2.5 flex-wrap">
-                                    <span className="bg-sky-500/15 border border-sky-400/30 text-sky-400 text-xs px-3 py-1 rounded-lg font-black">
+                                    <span className="bg-sky-50 border border-sky-200 text-sky-800 text-xs px-3 py-1 rounded-lg font-black">
                                       بخش {deptObj?.name}
                                     </span>
-                                    <span className="bg-slate-900 border border-white/10 text-slate-400 font-mono text-xs px-3 py-1 rounded-lg">
+                                    <span className="bg-slate-100 border border-slate-200 text-slate-600 font-mono text-xs px-3 py-1 rounded-lg">
                                       کد بیماری: {currentViewingDisease.id}
                                     </span>
                                   </div>
-                                  <h2 className="text-xl sm:text-2xl md:text-3xl font-black text-white leading-tight break-words">
+                                  <h2 className="text-xl sm:text-2xl md:text-3xl font-black text-slate-900 leading-tight break-words">
                                     {currentViewingDisease.name}
                                   </h2>
                                 </div>
@@ -8650,7 +8901,7 @@ export default function App() {
                                       setViewingDiseaseId(null);
                                       handleEditDiseaseClick(currentViewingDisease);
                                     }}
-                                    className="bg-sky-500/10 hover:bg-sky-500 text-sky-400 hover:text-white border border-sky-500/20 px-4 py-2.5 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer transition-all"
+                                    className="bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 px-4 py-2.5 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer transition-all"
                                   >
                                     <Edit3 className="w-4 h-4" />
                                     <span>ویرایش</span>
@@ -8660,7 +8911,7 @@ export default function App() {
                                     onClick={() => {
                                       handleDeleteDiseaseClick(currentViewingDisease.id, currentViewingDisease.name);
                                     }}
-                                    className="bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/20 px-4 py-2.5 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer transition-all"
+                                    className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 px-4 py-2.5 rounded-xl text-xs font-black flex items-center gap-1.5 cursor-pointer transition-all"
                                   >
                                     <Trash2 className="w-4 h-4" />
                                     <span>حذف</span>
@@ -8668,39 +8919,39 @@ export default function App() {
                                 </div>
                               </div>
 
-                              <p className="text-xs text-slate-400 font-medium">
+                              <p className="text-xs text-slate-500 font-medium">
                                 برای بازگشت به لیست کلی بیماری‌های این بخش یا ویرایش مطالب بالا، از دکمه‌های راهنما استفاده نمایید.
                               </p>
                             </div>
 
                             {/* Educational Text Display */}
-                            <div className="bg-[#111625] border border-white/10 p-6 md:p-8 rounded-3xl space-y-6 shadow-xl text-right">
-                              <div className="bg-white/5 border border-white/10 p-6 md:p-8 rounded-2xl">
+                            <div className="bg-white border border-slate-200 p-6 md:p-8 rounded-3xl space-y-6 shadow-sm text-right">
+                              <div className="bg-slate-50 border border-slate-200 p-6 md:p-8 rounded-2xl">
                                 <FormattedText
                                   content={currentViewingDisease.description}
-                                  className="text-base sm:text-lg md:text-xl text-slate-100 font-medium leading-[2.2rem] md:leading-[2.5rem] text-justify break-words"
+                                  className="text-base sm:text-lg md:text-xl text-slate-800 font-medium leading-[2.2rem] md:leading-[2.5rem] text-justify break-words"
                                 />
                               </div>
 
                               {currentViewingDisease.educationalContent && (
-                                <div className="bg-white/5 border border-white/10 p-6 md:p-8 rounded-2xl">
+                                <div className="bg-slate-50 border border-slate-200 p-6 md:p-8 rounded-2xl">
                                   <FormattedText
                                     content={currentViewingDisease.educationalContent}
-                                    className="text-base sm:text-lg md:text-xl text-slate-100 font-medium leading-[2.2rem] md:leading-[2.5rem] text-justify break-words"
+                                    className="text-base sm:text-lg md:text-xl text-slate-800 font-medium leading-[2.2rem] md:leading-[2.5rem] text-justify break-words"
                                   />
                                 </div>
                               )}
 
                               {currentViewingDisease.attachmentImages && currentViewingDisease.attachmentImages.length > 0 && (
                                 <div className="space-y-4 pt-2">
-                                  <h4 className="text-xs sm:text-sm font-black text-slate-300 uppercase tracking-wider">
+                                  <h4 className="text-xs sm:text-sm font-black text-slate-700 uppercase tracking-wider">
                                     <span>تصاویر ضمیمه و مستندات آموزشی بیماری:</span>
                                   </h4>
                                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     {currentViewingDisease.attachmentImages.map((imgUrl, idx) => (
                                       <div
                                         key={idx}
-                                        className="rounded-2xl overflow-hidden border border-white/10 bg-black/40 shadow-md group relative flex flex-col"
+                                        className="rounded-2xl overflow-hidden border border-slate-200 bg-white shadow-sm group relative flex flex-col"
                                       >
                                         <div className="relative flex-1 flex items-center justify-center overflow-hidden min-h-[14rem]">
                                           <img
@@ -8710,8 +8961,8 @@ export default function App() {
                                             referrerPolicy="no-referrer"
                                           />
                                         </div>
-                                        <div className="bg-slate-900/95 border-t border-white/10 p-3.5 flex items-center justify-between gap-3">
-                                          <span className="text-xs text-slate-300 font-bold">تصویر ضمیمه {idx + 1}</span>
+                                        <div className="bg-slate-50 border-t border-slate-200 p-3.5 flex items-center justify-between gap-3">
+                                          <span className="text-xs text-slate-700 font-bold">تصویر ضمیمه {idx + 1}</span>
                                           <button
                                             type="button"
                                             onClick={() => {
@@ -8722,7 +8973,7 @@ export default function App() {
                                               a.click();
                                               document.body.removeChild(a);
                                             }}
-                                            className="bg-sky-600 hover:bg-sky-500 text-white text-xs font-black px-4 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 shadow-md active:scale-95"
+                                            className="bg-sky-600 hover:bg-sky-700 text-white text-xs font-black px-4 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 shadow-sm active:scale-95"
                                             title="دانلود تصویر ضمیمه"
                                           >
                                             <Download className="w-4 h-4" />
@@ -8741,7 +8992,7 @@ export default function App() {
                               <button
                                 type="button"
                                 onClick={() => setViewingDiseaseId(null)}
-                                className="bg-white/10 hover:bg-white/15 text-white border border-white/10 font-black text-xs px-6 py-3 rounded-xl flex items-center gap-2 transition-all cursor-pointer"
+                                className="bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-black text-xs px-6 py-3 rounded-xl flex items-center gap-2 transition-all cursor-pointer"
                               >
                                 <ArrowRight className="w-4 h-4" />
                                 <span>بازگشت به لیست تمامی بیماری‌های بخش {deptObj?.name}</span>
@@ -8750,26 +9001,26 @@ export default function App() {
                           </div>
                         ) : (isAddingDisease || editingDiseaseId) ? (
                           /* CASE 2: ADD OR EDIT DISEASE FORM WITH WORD RICH TEXT EDITOR */
-                          <form onSubmit={handleCreateOrUpdateDiseaseSubmit} className="bg-[#111625] border border-white/10 p-6 md:p-8 rounded-3xl space-y-6 w-full max-w-full shadow-xl">
-                            <h4 className="text-sm font-black text-white border-b border-white/10 pb-3 text-right flex items-center justify-between">
+                          <form onSubmit={handleCreateOrUpdateDiseaseSubmit} className="bg-white border border-slate-200 p-6 md:p-8 rounded-3xl space-y-6 w-full max-w-full shadow-sm">
+                            <h4 className="text-sm font-black text-slate-900 border-b border-slate-200 pb-3 text-right flex items-center justify-between">
                               <span>{editingDiseaseId ? `ویرایش بیماری: "${diseaseFormName}"` : 'افزودن بیماری جدید به بخش'}</span>
-                              <span className="text-[11px] text-sky-400 font-normal">امکانات ویرایشگر متنی پیشرفته Word فعال است</span>
+                              <span className="text-[11px] text-sky-700 font-normal">امکانات ویرایشگر متنی پیشرفته Word فعال است</span>
                             </h4>
 
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-right">
                               <div>
-                                <label className="block text-[10px] text-slate-300 font-bold mb-1.5">نام بیماری (فارسی):</label>
+                                <label className="block text-[10px] text-slate-600 font-bold mb-1.5">نام بیماری (فارسی):</label>
                                 <input
                                   type="text"
                                   required
                                   placeholder="مثال: نارسایی احتقانی قلب"
                                   value={diseaseFormName}
                                   onChange={(e) => setDiseaseFormName(e.target.value)}
-                                  className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                                  className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 font-bold"
                                 />
                               </div>
                               <div>
-                                <label className="block text-[10px] text-slate-300 font-bold mb-1.5">شناسه انگلیسی (یکتا و بدون فاصله):</label>
+                                <label className="block text-[10px] text-slate-600 font-bold mb-1.5">شناسه انگلیسی (یکتا و بدون فاصله):</label>
                                 <input
                                   type="text"
                                   required
@@ -8777,7 +9028,7 @@ export default function App() {
                                   placeholder="مثال: heart_failure"
                                   value={diseaseFormEnglishName}
                                   onChange={(e) => setDiseaseFormEnglishName(e.target.value)}
-                                  className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold font-mono disabled:opacity-50 disabled:cursor-not-allowed"
+                                  className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 font-bold font-mono disabled:opacity-50 disabled:cursor-not-allowed"
                                 />
                               </div>
                             </div>
@@ -8788,12 +9039,12 @@ export default function App() {
                               onChange={setDiseaseFormDescription}
                               placeholder="خلاصه‌ای از ماهیت بیماری، علل ایجاد کننده، علائم کلی و آموزش‌های لازم جهت معرفی..."
                               minHeight="220px"
-                              theme="dark"
+                              theme="light"
                             />
 
                             <div>
-                              <label className="block text-[10px] text-slate-300 font-bold mb-1.5">تصاویر ضمیمه و مستندات آموزشی بیماری (نمایش در صفحه اختصاصی بیماری):</label>
-                              <div className="relative border-2 border-dashed border-white/15 hover:border-sky-400 rounded-2xl p-4 transition-all text-center bg-white/5 group">
+                              <label className="block text-[10px] text-slate-600 font-bold mb-1.5">تصاویر ضمیمه و مستندات آموزشی بیماری (نمایش در صفحه اختصاصی بیماری):</label>
+                              <div className="relative border-2 border-dashed border-slate-300 hover:border-sky-500 rounded-2xl p-4 transition-all text-center bg-slate-50 group">
                                 <input
                                   type="file"
                                   accept="image/*"
@@ -8813,17 +9064,17 @@ export default function App() {
                                   className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
                                 />
                                 <div className="space-y-2 py-2">
-                                  <div className="bg-sky-500/10 text-sky-400 p-2.5 rounded-xl inline-block group-hover:bg-sky-500 group-hover:text-white transition-all">
+                                  <div className="bg-sky-50 text-sky-600 p-2.5 rounded-xl inline-block group-hover:bg-sky-600 group-hover:text-white transition-all">
                                     <FileUp className="w-5 h-5" />
                                   </div>
-                                  <p className="text-[11px] text-slate-300 font-bold">برای انتخاب یا افزودن تصاویر ضمیمه بیماری کلیک کنید (امکان انتخاب چند عکس)</p>
-                                  <p className="text-[9px] text-slate-500">فرمت‌های JPG, PNG, WEBP</p>
+                                  <p className="text-[11px] text-slate-700 font-bold">برای انتخاب یا افزودن تصاویر ضمیمه بیماری کلیک کنید (امکان انتخاب چند عکس)</p>
+                                  <p className="text-[9px] text-slate-400">فرمت‌های JPG, PNG, WEBP</p>
                                 </div>
                               </div>
                               {diseaseFormAttachmentImages.length > 0 && (
                                 <div className="mt-3 grid grid-cols-2 sm:grid-cols-3 gap-3">
                                   {diseaseFormAttachmentImages.map((imgUrl, idx) => (
-                                    <div key={idx} className="relative group/thumb rounded-xl overflow-hidden border border-white/10 bg-black/40">
+                                    <div key={idx} className="relative group/thumb rounded-xl overflow-hidden border border-slate-200 bg-white">
                                       <img
                                         src={imgUrl}
                                         alt={`ضمیمه بیماری ${idx + 1}`}
@@ -8834,7 +9085,7 @@ export default function App() {
                                         onClick={() => {
                                           setDiseaseFormAttachmentImages(prev => prev.filter((_, i) => i !== idx));
                                         }}
-                                        className="absolute top-1.5 right-1.5 bg-rose-600/90 hover:bg-rose-600 text-white p-1.5 rounded-lg transition-all cursor-pointer shadow-md"
+                                        className="absolute top-1.5 right-1.5 bg-rose-600 hover:bg-rose-700 text-white p-1.5 rounded-lg transition-all cursor-pointer shadow-md"
                                         title="حذف این تصویر"
                                       >
                                         <Trash2 className="w-3.5 h-3.5" />
@@ -8853,13 +9104,13 @@ export default function App() {
                                   setEditingDiseaseId(null);
                                   setDiseaseFormAttachmentImages([]);
                                 }}
-                                className="text-xs text-slate-400 bg-white/5 border border-white/10 hover:bg-white/10 px-5 py-2.5 rounded-xl font-bold cursor-pointer"
+                                className="text-xs text-slate-600 bg-slate-100 border border-slate-300 hover:bg-slate-200 px-5 py-2.5 rounded-xl font-bold cursor-pointer"
                               >
                                 انصراف
                               </button>
                               <button
                                 type="submit"
-                                className="text-xs text-white bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 px-6 py-2.5 rounded-xl font-black cursor-pointer shadow-lg shadow-emerald-500/15"
+                                className="text-xs text-white bg-emerald-600 hover:bg-emerald-700 px-6 py-2.5 rounded-xl font-black cursor-pointer shadow-sm"
                               >
                                 {editingDiseaseId ? 'ذخیره تغییرات بیماری' : 'افزودن و ثبت بیماری'}
                               </button>
@@ -8869,7 +9120,7 @@ export default function App() {
                           /* CASE 3: LIST OF DISEASES AS CLEAN CARDS */
                           <div className="space-y-4 text-right w-full max-w-full overflow-hidden">
                             {/* Toolbar & Search */}
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white/5 border border-white/10 p-3.5 rounded-2xl shadow-sm">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white border border-slate-200 p-3.5 rounded-2xl shadow-sm">
                               <div className="relative flex-1">
                                 <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
                                 <input
@@ -8877,13 +9128,13 @@ export default function App() {
                                   placeholder="جستجوی سریع در لیست بیماری‌های این بخش..."
                                   value={diseaseSearchQuery}
                                   onChange={(e) => setDiseaseSearchQuery(e.target.value)}
-                                  className="w-full text-xs bg-slate-950/60 border border-white/10 text-white placeholder:text-slate-500 rounded-xl pr-9 pl-3 py-2 outline-none focus:border-sky-500/50 font-bold"
+                                  className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl pr-9 pl-3 py-2 outline-none focus:border-sky-500 font-bold"
                                 />
                               </div>
 
                               <div className="flex items-center gap-2 justify-between sm:justify-end shrink-0">
-                                <span className="text-[11px] text-slate-300 font-bold">
-                                  تعداد بیماری‌های ثبت‌شده: <span className="font-mono text-sky-400">{deptDiseasesList.length}</span>
+                                <span className="text-[11px] text-slate-700 font-bold">
+                                  تعداد بیماری‌های ثبت‌شده: <span className="font-mono text-sky-700">{deptDiseasesList.length}</span>
                                 </span>
                               </div>
                             </div>
@@ -8899,19 +9150,19 @@ export default function App() {
                                   <div
                                     key={disease.id}
                                     onClick={() => setViewingDiseaseId(disease.id)}
-                                    className="bg-white/5 hover:bg-sky-500/[0.04] border border-white/10 hover:border-sky-500/40 p-5 rounded-2xl transition-all duration-200 cursor-pointer group space-y-3"
+                                    className="bg-white hover:bg-sky-50/50 border border-slate-200 hover:border-sky-300 p-5 rounded-2xl transition-all duration-200 cursor-pointer group space-y-3 shadow-sm"
                                   >
                                     <div className="flex items-center justify-between gap-3 flex-wrap">
                                       <div className="flex items-center gap-3 min-w-0">
-                                        <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400 shrink-0">
+                                        <div className="p-2.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-700 shrink-0">
                                           <BookOpen className="w-4 h-4" />
                                         </div>
                                         <div className="min-w-0">
                                           <div className="flex items-center gap-2.5 flex-wrap">
-                                            <h4 className="text-sm md:text-base font-black text-white group-hover:text-sky-300 transition-colors">
+                                            <h4 className="text-sm md:text-base font-black text-slate-900 group-hover:text-sky-700 transition-colors">
                                               {disease.name}
                                             </h4>
-                                            <span className="font-mono text-[9px] bg-slate-900 text-slate-400 border border-white/10 px-2 py-0.5 rounded-md uppercase">
+                                            <span className="font-mono text-[9px] bg-slate-100 text-slate-600 border border-slate-200 px-2 py-0.5 rounded-md uppercase">
                                               کد: {disease.id}
                                             </span>
                                           </div>
@@ -8926,7 +9177,7 @@ export default function App() {
                                             e.stopPropagation();
                                             setViewingDiseaseId(disease.id);
                                           }}
-                                          className="text-[11px] font-black text-sky-400 bg-sky-500/10 hover:bg-sky-500 hover:text-white border border-sky-500/20 px-3.5 py-1.5 rounded-xl transition-all flex items-center gap-1 cursor-pointer"
+                                          className="text-[11px] font-black text-sky-700 bg-sky-50 hover:bg-sky-600 hover:text-white border border-sky-200 px-3.5 py-1.5 rounded-xl transition-all flex items-center gap-1 cursor-pointer"
                                         >
                                           <span>مطالعه کامل</span>
                                           <ArrowLeft className="w-3.5 h-3.5" />
@@ -8937,7 +9188,7 @@ export default function App() {
                                             e.stopPropagation();
                                             handleEditDiseaseClick(disease);
                                           }}
-                                          className="p-2 text-xs font-black bg-white/5 hover:bg-sky-500 text-slate-300 hover:text-white border border-white/10 rounded-xl cursor-pointer transition-all"
+                                          className="p-2 text-xs font-black bg-slate-100 hover:bg-sky-600 text-slate-700 hover:text-white border border-slate-200 rounded-xl cursor-pointer transition-all"
                                           title="ویرایش بیماری"
                                         >
                                           <Edit3 className="w-3.5 h-3.5" />
@@ -8948,7 +9199,7 @@ export default function App() {
                                             e.stopPropagation();
                                             handleDeleteDiseaseClick(disease.id, disease.name);
                                           }}
-                                          className="p-2 text-xs font-black bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/20 rounded-xl cursor-pointer transition-all"
+                                          className="p-2 text-xs font-black bg-rose-50 hover:bg-rose-600 text-rose-700 hover:text-white border border-rose-200 rounded-xl cursor-pointer transition-all"
                                           title="حذف بیماری"
                                         >
                                           <Trash2 className="w-4 h-4" />
@@ -8957,7 +9208,7 @@ export default function App() {
                                     </div>
 
                                     {/* Brief description snippet */}
-                                    <p className="text-xs text-slate-300 font-medium leading-relaxed line-clamp-2 text-justify">
+                                    <p className="text-xs text-slate-600 font-medium leading-relaxed line-clamp-2 text-justify">
                                       {stripHtmlTags(disease.description)}
                                     </p>
                                   </div>
@@ -8966,11 +9217,11 @@ export default function App() {
                             </div>
 
                             {deptDiseasesList.length === 0 && (
-                              <div className="text-center py-16 bg-white/5 border border-white/10 rounded-3xl space-y-3 shadow-sm">
-                                <BookOpen className="w-10 h-10 text-slate-500 mx-auto" />
+                              <div className="text-center py-16 bg-white border border-slate-200 rounded-3xl space-y-3 shadow-sm">
+                                <BookOpen className="w-10 h-10 text-slate-400 mx-auto" />
                                 <div className="space-y-1">
-                                  <p className="text-xs text-slate-300 font-bold">هیچ بیماری به این بخش اضافه نشده است.</p>
-                                  <p className="text-[10px] text-slate-400 font-medium">می‌توانید با کلیک بر روی دکمه فوق اولین بیماری را ثبت کنید.</p>
+                                  <p className="text-xs text-slate-700 font-bold">هیچ بیماری به این بخش اضافه نشده است.</p>
+                                  <p className="text-[10px] text-slate-500 font-medium">می‌توانید با کلیک بر روی دکمه فوق اولین بیماری را ثبت کنید.</p>
                                 </div>
                               </div>
                             )}
@@ -8984,68 +9235,68 @@ export default function App() {
                   {adminTab === 'admins_manage' && currentAdmin.role === 'super' && (
                     <div className="space-y-8 text-right font-sans">
                       <div>
-                        <h3 className="text-xl font-black text-white mb-1.5 flex items-center gap-2">
-                          <Users className="w-6 h-6 text-sky-400 animate-pulse" />
+                        <h3 className="text-xl font-black text-slate-900 mb-1.5 flex items-center gap-2">
+                          <Users className="w-6 h-6 text-sky-600 animate-pulse" />
                           <span>معرفی و مدیریت مسئولین بخش‌ها</span>
                         </h3>
-                        <p className="text-xs text-slate-300 font-medium">ادمین کل می‌تواند کاربران مسئول هر بخش را تعریف و حقوق دسترسی آنان را مشخص کند.</p>
+                        <p className="text-xs text-slate-600 font-medium">ادمین کل می‌تواند کاربران مسئول هر بخش را تعریف و حقوق دسترسی آنان را مشخص کند.</p>
                       </div>
 
                       <div className="grid md:grid-cols-2 gap-8">
 
                         {/* Introduce Form */}
-                        <form onSubmit={handleCreateOrUpdateAdmin} className="space-y-4 bg-white/5 p-6 rounded-3xl border border-white/10 shadow-2xl">
-                          <h4 className="text-xs font-black text-slate-300 border-b border-white/5 pb-2 mb-4">ایجاد حساب کاربری مسئول بخش جدید</h4>
+                        <form onSubmit={handleCreateOrUpdateAdmin} className="space-y-4 bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
+                          <h4 className="text-xs font-black text-slate-800 border-b border-slate-200 pb-2 mb-4">ایجاد حساب کاربری مسئول بخش جدید</h4>
 
                           {adminManageMsg && (
-                            <div className="bg-emerald-950/30 border border-emerald-500/30 text-emerald-200 text-xs font-black p-3 rounded-xl">
+                            <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs font-black p-3 rounded-xl">
                               {adminManageMsg}
                             </div>
                           )}
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">نام و نام خانوادگی پزشک/پرستار:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">نام و نام خانوادگی پزشک/پرستار:</label>
                             <input
                               type="text"
                               placeholder="مثال: دکتر صادقی"
                               value={newAdminName}
                               onChange={(e) => setNewAdminName(e.target.value)}
-                              className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                              className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 font-bold"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">نام کاربری ورود:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">نام کاربری ورود:</label>
                             <input
                               type="text"
                               placeholder="مثال: admin_sadeghi"
                               value={newAdminUser}
                               onChange={(e) => setNewAdminUser(e.target.value)}
-                              className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                              className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 font-bold"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">کلمه عبور:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">کلمه عبور:</label>
                             <input
                               type="password"
                               placeholder="حداقل ۶ کاراکتر"
                               value={newAdminPass}
                               onChange={(e) => setNewAdminPass(e.target.value)}
-                              className="w-full text-xs bg-white/5 border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                              className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 font-bold"
                             />
                           </div>
 
                           <div>
-                            <label className="block text-xs font-bold text-slate-300 mb-2">بخش تحت مدیریت:</label>
+                            <label className="block text-xs font-bold text-slate-700 mb-2">بخش تحت مدیریت:</label>
                             <select
                               value={newAdminDept}
                               onChange={(e) => setNewAdminDept(e.target.value)}
-                              className="w-full text-xs bg-[#111625] border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold cursor-pointer"
+                              className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 font-bold cursor-pointer"
                             >
-                              <option value="" className="bg-[#111625] text-slate-400">-- انتخاب بخش --</option>
+                              <option value="" className="bg-white text-slate-500">-- انتخاب بخش --</option>
                               {departments.map(d => (
-                                <option key={d.id} value={d.id} className="bg-[#111625] text-white font-bold">
+                                <option key={d.id} value={d.id} className="bg-white text-slate-800 font-bold">
                                   {d.name}
                                 </option>
                               ))}
@@ -9063,14 +9314,14 @@ export default function App() {
                                   setNewAdminName('');
                                   setNewAdminDept('');
                                 }}
-                                className="text-xs text-slate-400 bg-white/5 border border-white/10 hover:bg-white/10 px-5 py-2.5 rounded-xl font-bold cursor-pointer"
+                                className="text-xs text-slate-600 bg-slate-100 border border-slate-300 hover:bg-slate-200 px-5 py-2.5 rounded-xl font-bold cursor-pointer"
                               >
                                 انصراف
                               </button>
                             )}
                             <button
                               type="submit"
-                              className="text-xs text-white bg-gradient-to-r from-sky-500 to-blue-500 hover:from-sky-600 hover:to-blue-600 px-6 py-2.5 rounded-xl font-black cursor-pointer shadow-lg shadow-sky-500/15"
+                              className="text-xs text-white bg-sky-600 hover:bg-sky-700 px-6 py-2.5 rounded-xl font-black cursor-pointer shadow-sm"
                             >
                               {editingAdminUsername ? 'ویرایش اطلاعات مسئول' : 'معرفی مسئول جدید'}
                             </button>
@@ -9078,22 +9329,22 @@ export default function App() {
                         </form>
 
                         {/* List of Admins */}
-                        <div className="bg-white/5 p-6 rounded-3xl border border-white/10 shadow-2xl text-right">
-                          <h4 className="text-xs font-black text-slate-300 border-b border-white/5 pb-2 mb-4">لیست مدیران و مسئولین تعریف شده</h4>
+                        <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm text-right">
+                          <h4 className="text-xs font-black text-slate-800 border-b border-slate-200 pb-2 mb-4">لیست مدیران و مسئولین تعریف شده</h4>
                           <div className="space-y-4 max-h-[400px] overflow-y-auto pr-1">
                             {admins.map(admin => {
                               const deptName = departments.find(d => d.id === admin.departmentId)?.name || 'ادمین کل / تمامی بخش‌ها';
                               return (
-                                <div key={admin.username} className="bg-[#111625] border border-white/5 p-4 rounded-2xl flex justify-between items-center gap-4 transition-all hover:bg-white/5">
+                                <div key={admin.username} className="bg-slate-50 border border-slate-200 p-4 rounded-2xl flex justify-between items-center gap-4 transition-all hover:bg-slate-100">
                                   <div>
-                                    <h5 className="text-xs font-black text-white">{admin.fullName}</h5>
-                                    <p className="text-[10px] text-slate-400 font-bold mt-1">نام کاربری: {admin.username} | بخش: <span className="text-sky-400 font-black">{deptName}</span></p>
+                                    <h5 className="text-xs font-black text-slate-900">{admin.fullName}</h5>
+                                    <p className="text-[10px] text-slate-500 font-bold mt-1">نام کاربری: {admin.username} | بخش: <span className="text-sky-700 font-black">{deptName}</span></p>
                                   </div>
                                   <div className="flex gap-1.5 font-sans">
                                     <button
                                       type="button"
                                       onClick={() => handleStartEditAdmin(admin)}
-                                      className="p-2 text-[10px] text-sky-400 hover:text-white bg-sky-500/10 hover:bg-sky-500 rounded-lg transition-all cursor-pointer"
+                                      className="p-2 text-[10px] text-sky-700 hover:text-white bg-sky-50 hover:bg-sky-600 rounded-lg transition-all cursor-pointer border border-sky-200"
                                       title="ویرایش"
                                     >
                                       <Edit3 className="w-3.5 h-3.5" />
@@ -9101,7 +9352,7 @@ export default function App() {
                                     <button
                                       type="button"
                                       onClick={() => handleDeleteAdmin(admin.username)}
-                                      className="p-2 text-[10px] text-rose-400 hover:text-white bg-rose-500/10 hover:bg-rose-500 rounded-lg transition-all cursor-pointer"
+                                      className="p-2 text-[10px] text-rose-700 hover:text-white bg-rose-50 hover:bg-rose-600 rounded-lg transition-all cursor-pointer border border-rose-200"
                                       title="حذف"
                                     >
                                       <Trash2 className="w-3.5 h-3.5" />
@@ -9120,13 +9371,13 @@ export default function App() {
                   {/* TAB 7: CHECKLIST MANAGEMENT */}
                   {adminTab === 'checklists' && currentAdmin.role === 'super' && (
                     <div className="space-y-6 text-right">
-                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white/5 border border-white/10 rounded-[2.5rem] p-6 sm:p-8">
+                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white border border-slate-200 rounded-[2.5rem] p-6 sm:p-8 shadow-sm">
                         <div>
-                          <h3 className="text-xl font-black text-white mb-1.5 flex items-center gap-2">
-                            <ClipboardList className="w-6 h-6 text-teal-400 animate-pulse" />
+                          <h3 className="text-xl font-black text-slate-900 mb-1.5 flex items-center gap-2">
+                            <ClipboardList className="w-6 h-6 text-teal-600 animate-pulse" />
                             <span>مدیریت چک‌لیست‌های ارزیابی و پیگیری بیمارستان</span>
                           </h3>
-                          <p className="text-xs text-slate-300 font-medium leading-relaxed">
+                          <p className="text-xs text-slate-600 font-medium leading-relaxed">
                             تعریف، ویرایش و پایش انواع چک‌لیست‌های رضایت‌سنجی ترخیص و چک‌لیست‌های خودارزیابی و پایش سلامتی در منزل.
                           </p>
                         </div>
@@ -9134,7 +9385,7 @@ export default function App() {
                           {editingChecklist === null && (
                             <button
                               onClick={() => handleEditChecklistInit('new')}
-                              className="bg-gradient-to-r from-teal-400 to-emerald-500 hover:from-teal-500 hover:to-emerald-600 text-white font-black px-5 py-3 rounded-2xl text-xs flex items-center gap-1.5 shadow-lg shadow-teal-500/15 transition-all cursor-pointer"
+                              className="bg-teal-600 hover:bg-teal-700 text-white font-black px-5 py-3 rounded-2xl text-xs flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
                             >
                               <Plus className="w-4 h-4" />
                               <span>تعریف چک‌لیست جدید</span>
@@ -9142,7 +9393,7 @@ export default function App() {
                           )}
                           <button
                             onClick={() => setAdminTab('overview')}
-                            className="bg-slate-800 hover:bg-slate-700 text-white border border-white/15 font-black px-5 py-3 rounded-2xl text-xs flex items-center gap-2 shadow-lg hover:scale-105 active:scale-95 transition-all duration-300 cursor-pointer"
+                            className="bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-black px-5 py-3 rounded-2xl text-xs flex items-center gap-2 shadow-sm transition-all duration-300 cursor-pointer"
                           >
                             <ArrowRight className="w-4 h-4" />
                             <span>بازگشت به منوی ادمین</span>
@@ -9152,48 +9403,48 @@ export default function App() {
 
                       {editingChecklist !== null ? (
                         /* Editing Checklist Form */
-                        <form onSubmit={handleSaveChecklist} className="space-y-6 bg-white/5 border border-white/10 p-6 sm:p-8 rounded-[2.5rem] shadow-2xl relative">
-                          <div className="border-b border-white/10 pb-4">
-                            <h4 className="text-base font-black text-teal-400">
+                        <form onSubmit={handleSaveChecklist} className="space-y-6 bg-white border border-slate-200 p-6 sm:p-8 rounded-[2.5rem] shadow-sm relative">
+                          <div className="border-b border-slate-200 pb-4">
+                            <h4 className="text-base font-black text-teal-700">
                               {editingChecklist.id.startsWith('new_checklist_') ? 'تعریف چک‌لیست جدید ارزیابی' : 'ویرایش چک‌لیست ارزیابی'}
                             </h4>
                           </div>
 
                           <div className="grid sm:grid-cols-2 gap-6">
                             <div>
-                              <label className="block text-xs font-bold text-slate-300 mb-2">عنوان چک‌لیست:</label>
+                              <label className="block text-xs font-bold text-slate-700 mb-2">عنوان چک‌لیست:</label>
                               <input
                                 type="text"
                                 value={checklistFormTitle}
                                 onChange={(e) => setChecklistFormTitle(e.target.value)}
                                 placeholder="مثال: چک‌لیست رضایت‌سنجی ترخیص بخش جراحی"
-                                className="w-full text-xs bg-white/5 border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-teal-500/40 font-bold text-right"
+                                className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-teal-500/20 font-bold text-right"
                                 required
                               />
                             </div>
 
                             <div>
-                              <label className="block text-xs font-bold text-slate-300 mb-2">نوع چک‌لیست:</label>
+                              <label className="block text-xs font-bold text-slate-700 mb-2">نوع چک‌لیست:</label>
                               <select
                                 value={checklistFormTargetType}
                                 onChange={(e) => setChecklistFormTargetType(e.target.value as any)}
-                                className="w-full text-xs bg-[#111625] border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-teal-500/40 font-bold cursor-pointer text-right"
+                                className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-teal-500/20 font-bold cursor-pointer text-right"
                               >
-                                <option value="satisfaction" className="bg-[#111625]">نظرسنجی رضایت بیمار (ترخیص)</option>
-                                <option value="patient" className="bg-[#111625]">خودارزیابی خودمراقبتی بیمار (منزل)</option>
+                                <option value="satisfaction" className="bg-white">نظرسنجی رضایت بیمار (ترخیص)</option>
+                                <option value="patient" className="bg-white">خودارزیابی خودمراقبتی بیمار (منزل)</option>
                               </select>
                             </div>
 
                             {checklistFormTargetType === 'satisfaction' && (
                               <div className="sm:col-span-2">
-                                <label className="block text-xs font-bold text-slate-300 mb-2">اختصاص به بخش درمانی:</label>
+                                <label className="block text-xs font-bold text-slate-700 mb-2">اختصاص به بخش درمانی:</label>
                                 <select
                                   value={checklistFormDeptId}
                                   onChange={(e) => setChecklistFormDeptId(e.target.value)}
-                                  className="w-full text-xs bg-[#111625] border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-teal-500/40 font-bold cursor-pointer text-right"
+                                  className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-800 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-teal-500/20 font-bold cursor-pointer text-right"
                                 >
                                   {departments.map(d => (
-                                    <option key={d.id} value={d.id} className="bg-[#111625]">{d.name}</option>
+                                    <option key={d.id} value={d.id} className="bg-white">{d.name}</option>
                                   ))}
                                 </select>
                               </div>
@@ -9201,20 +9452,20 @@ export default function App() {
                           </div>
 
                           {/* Questions Form Area */}
-                          <div className="bg-[#111625]/60 border border-white/5 p-6 rounded-[2rem] space-y-4">
-                            <h5 className="text-xs font-black text-slate-300 border-b border-white/5 pb-2">سوالات چک‌لیست ({checklistFormQuestions.length} سوال ثبت شده)</h5>
+                          <div className="bg-slate-50 border border-slate-200 p-6 rounded-[2rem] space-y-4">
+                            <h5 className="text-xs font-black text-slate-800 border-b border-slate-200 pb-2">سوالات چک‌لیست ({checklistFormQuestions.length} سوال ثبت شده)</h5>
 
                             {/* Current checklistFormQuestions list */}
                             <div className="space-y-3 max-h-[250px] overflow-y-auto pr-1 text-right">
                               {checklistFormQuestions.map((q, idx) => (
-                                <div key={q.id} className="bg-white/5 border border-white/5 p-4 rounded-xl flex justify-between items-center gap-4">
+                                <div key={q.id} className="bg-white border border-slate-200 p-4 rounded-xl flex justify-between items-center gap-4">
                                   <div className="flex gap-2 items-center flex-grow">
-                                    <span className="bg-teal-500/10 text-teal-300 border border-teal-500/20 text-xs font-black px-2.5 py-1 rounded-lg">
+                                    <span className="bg-teal-50 text-teal-700 border border-teal-200 text-xs font-black px-2.5 py-1 rounded-lg">
                                       {idx + 1}
                                     </span>
                                     <div>
-                                      <p className="text-xs text-white font-bold">{q.text}</p>
-                                      <p className="text-[9px] text-slate-400 mt-1 font-bold">
+                                      <p className="text-xs text-slate-900 font-bold">{q.text}</p>
+                                      <p className="text-[9px] text-slate-500 mt-1 font-bold">
                                         نوع پاسخ: {
                                           q.type === 'qualitative' ? 'کیفی' :
                                           q.type === 'quantitative' ? 'عددی' :
@@ -9227,37 +9478,37 @@ export default function App() {
                                   <button
                                     type="button"
                                     onClick={() => handleRemoveQuestionFromForm(q.id)}
-                                    className="text-rose-400 hover:text-white bg-rose-500/10 hover:bg-rose-500 p-2 rounded-xl transition-all cursor-pointer"
+                                    className="text-rose-600 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 p-2 rounded-xl transition-all cursor-pointer border border-rose-200"
                                   >
                                     <Trash2 className="w-3.5 h-3.5" />
                                   </button>
                                 </div>
                               ))}
                               {checklistFormQuestions.length === 0 && (
-                                <p className="text-center text-[11px] text-slate-400 py-4">هنوز سوالی برای این چک‌لیست تعریف نشده است. از فرم زیر برای افزودن سوال استفاده کنید.</p>
+                                <p className="text-center text-[11px] text-slate-500 py-4">هنوز سوالی برای این چک‌لیست تعریف نشده است. از فرم زیر برای افزودن سوال استفاده کنید.</p>
                               )}
                             </div>
 
                             {/* Add Question Subform */}
-                            <div className="border-t border-white/5 pt-4 grid gap-4">
-                              <h6 className="text-[11px] font-black text-teal-400">افزودن سوال جدید به چک‌لیست:</h6>
+                            <div className="border-t border-slate-200 pt-4 grid gap-4">
+                              <h6 className="text-[11px] font-black text-teal-700">افزودن سوال جدید به چک‌لیست:</h6>
                               <div className="grid sm:grid-cols-3 gap-4 items-end">
                                 <div className="sm:col-span-2">
-                                  <label className="block text-[10px] font-bold text-slate-400 mb-1">متن سوال ارزیابی:</label>
+                                  <label className="block text-[10px] font-bold text-slate-600 mb-1">متن سوال ارزیابی:</label>
                                   <input
                                     type="text"
                                     placeholder="مثال: میزان درد خود را از ۱ تا ۱۰ توصیف کنید"
                                     value={newQText}
                                     onChange={(e) => setNewQText(e.target.value)}
-                                    className="w-full text-xs bg-[#121826] border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-teal-500/40 font-bold"
+                                    className="w-full text-xs bg-white border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-teal-500/20 font-bold"
                                   />
                                 </div>
                                 <div>
-                                  <label className="block text-[10px] font-bold text-slate-400 mb-1">نوع پاسخ سوال:</label>
+                                  <label className="block text-[10px] font-bold text-slate-600 mb-1">نوع پاسخ سوال:</label>
                                   <select
                                     value={newQType}
                                     onChange={(e) => setNewQType(e.target.value as any)}
-                                    className="w-full text-xs bg-[#121826] border border-white/10 text-white rounded-xl px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-teal-500/40 font-bold cursor-pointer"
+                                    className="w-full text-xs bg-white border border-slate-300 text-slate-800 rounded-xl px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-teal-500/20 font-bold cursor-pointer"
                                   >
                                     <option value="qualitative">کیفی (عالی، خوب، متوسط، ضعیف)</option>
                                     <option value="quantitative">عددی / مقداری (مانند فشار خون یا قند خون)</option>
@@ -9270,13 +9521,13 @@ export default function App() {
 
                               {(newQType === 'multiple_choice' || newQType === 'qualitative') && (
                                 <div className="animate-fade-in text-right">
-                                  <label className="block text-[10px] font-bold text-slate-400 mb-1">گزینه‌های پاسخ (با ویرگول انگلیسی یا فارسی جدا کنید):</label>
+                                  <label className="block text-[10px] font-bold text-slate-600 mb-1">گزینه‌های پاسخ (با ویرگول انگلیسی یا فارسی جدا کنید):</label>
                                   <input
                                     type="text"
                                     placeholder="مثال: بسیار عالی, رضایت‌بخش, نیاز به بهبود, ضعیف"
                                     value={newQOptions}
                                     onChange={(e) => setNewQOptions(e.target.value)}
-                                    className="w-full text-xs bg-[#121826] border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-teal-500/40 font-bold"
+                                    className="w-full text-xs bg-white border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-teal-500/20 font-bold"
                                   />
                                 </div>
                               )}
@@ -9284,30 +9535,30 @@ export default function App() {
                               <button
                                 type="button"
                                 onClick={handleAddQuestionToForm}
-                                className="bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-black px-4 py-2.5 rounded-xl border border-white/10 transition-all cursor-pointer flex items-center gap-1"
+                                className="bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-black px-4 py-2.5 rounded-xl border border-slate-300 transition-all cursor-pointer flex items-center gap-1"
                               >
-                                <Plus className="w-4 h-4 text-teal-400" />
+                                <Plus className="w-4 h-4 text-teal-600" />
                                 <span>ثبت و درج سوال به لیست موقت</span>
                               </button>
                             </div>
                           </div>
 
                           {/* Submit Actions */}
-                          <div className="flex justify-end gap-3 border-t border-white/10 pt-6">
+                          <div className="flex justify-end gap-3 border-t border-slate-200 pt-6">
                             <button
                               type="button"
                               onClick={() => setEditingChecklist(null)}
-                              className="text-slate-400 hover:text-white bg-transparent hover:bg-white/5 border border-white/10 px-5 py-3 rounded-2xl text-xs font-black transition-all cursor-pointer"
+                              className="text-slate-600 hover:text-slate-900 bg-slate-100 border border-slate-300 px-5 py-3 rounded-2xl text-xs font-black transition-all cursor-pointer"
                             >
                               انصراف
                             </button>
                             <button
                               type="submit"
                               disabled={checklistFormQuestions.length === 0}
-                              className={`font-black px-6 py-3 rounded-2xl text-xs flex items-center gap-2 border shadow-lg transition-all cursor-pointer ${
+                              className={`font-black px-6 py-3 rounded-2xl text-xs flex items-center gap-2 border shadow-sm transition-all cursor-pointer ${
                                 checklistFormQuestions.length === 0
-                                  ? 'bg-slate-800 text-slate-500 border-white/5 cursor-not-allowed shadow-none'
-                                  : 'bg-gradient-to-r from-teal-400 to-emerald-500 hover:from-teal-500 hover:to-emerald-600 border-teal-400/30 text-white shadow-teal-500/15'
+                                  ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+                                  : 'bg-teal-600 hover:bg-teal-700 border-teal-600 text-white'
                               }`}
                             >
                               <Check className="w-4 h-4" />
@@ -9316,28 +9567,27 @@ export default function App() {
                           </div>
                         </form>
                       ) : selectedChecklistCategory === null ? (
-                        /* Two beautiful category tile cards initially displayed */
+                        /* Two category tile cards initially displayed */
                         <div className="grid sm:grid-cols-2 gap-8 text-right font-sans">
                           {/* Card 1: Satisfaction Checklists */}
                           <div
                             onClick={() => setSelectedChecklistCategory('satisfaction')}
-                            className="group bg-gradient-to-br from-[#1b223c] to-[#121629] border border-white/10 hover:border-amber-400 p-8 rounded-[2.5rem] cursor-pointer transition-all duration-300 hover:scale-[1.02] hover:shadow-2xl hover:shadow-amber-500/10 flex flex-col justify-between min-h-[260px] relative overflow-hidden"
+                            className="group bg-white border border-slate-200 hover:border-amber-400 p-8 rounded-[2.5rem] cursor-pointer transition-all duration-300 hover:shadow-md flex flex-col justify-between min-h-[260px] relative overflow-hidden"
                           >
-                            <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-amber-500/10 to-transparent rounded-full blur-2xl pointer-events-none" />
                             <div className="flex justify-between items-start relative z-10">
-                              <div className="bg-amber-500/10 text-amber-400 p-5 rounded-2xl border border-amber-400/20 group-hover:bg-amber-500 group-hover:text-white transition-all duration-300">
+                              <div className="bg-amber-50 text-amber-600 p-5 rounded-2xl border border-amber-200 group-hover:bg-amber-500 group-hover:text-white transition-all duration-300">
                                 <HeartHandshake className="w-8 h-8" />
                               </div>
-                              <span className="text-xs bg-amber-500/15 text-amber-300 px-4 py-1.5 rounded-full font-black border border-amber-500/20 shadow-md">
+                              <span className="text-xs bg-amber-50 text-amber-800 px-4 py-1.5 rounded-full font-black border border-amber-200">
                                 {customChecklists.filter(c => c.targetType === 'satisfaction').length} چک‌لیست فعال
                               </span>
                             </div>
                             <div className="mt-8 relative z-10">
-                              <h3 className="text-lg sm:text-xl font-black text-white group-hover:text-amber-300 transition-colors">چک‌لیست‌های ارزیابی رضایت‌مندی</h3>
-                              <p className="text-xs text-slate-300 font-bold mt-3 leading-relaxed">
+                              <h3 className="text-lg sm:text-xl font-black text-slate-900 group-hover:text-amber-600 transition-colors">چک‌لیست‌های ارزیابی رضایت‌مندی</h3>
+                              <p className="text-xs text-slate-600 font-bold mt-3 leading-relaxed">
                                 نظرسنجی‌ها و ارزیابی‌های پیشرفته مربوط به سنجش رضایت بیماران ترخیص‌شده از ابعاد مختلف هتلینگ، خدمات درمانی و بهداشت بخش‌ها.
                               </p>
-                              <div className="mt-5 flex items-center gap-1.5 text-xs text-amber-400 font-black group-hover:translate-x-1 transition-transform duration-300">
+                              <div className="mt-5 flex items-center gap-1.5 text-xs text-amber-600 font-black group-hover:translate-x-1 transition-transform duration-300">
                                 <span>ورود و مدیریت چک‌لیست‌ها</span>
                                 <ChevronLeft className="w-4 h-4" />
                               </div>
@@ -9347,23 +9597,22 @@ export default function App() {
                           {/* Card 2: Patient Follow-up Checklists */}
                           <div
                             onClick={() => setSelectedChecklistCategory('patient')}
-                            className="group bg-gradient-to-br from-[#1b223c] to-[#121629] border border-white/10 hover:border-indigo-400 p-8 rounded-[2.5rem] cursor-pointer transition-all duration-300 hover:scale-[1.02] hover:shadow-2xl hover:shadow-indigo-500/10 flex flex-col justify-between min-h-[260px] relative overflow-hidden"
+                            className="group bg-white border border-slate-200 hover:border-indigo-400 p-8 rounded-[2.5rem] cursor-pointer transition-all duration-300 hover:shadow-md flex flex-col justify-between min-h-[260px] relative overflow-hidden"
                           >
-                            <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-indigo-500/10 to-transparent rounded-full blur-2xl pointer-events-none" />
                             <div className="flex justify-between items-start relative z-10">
-                              <div className="bg-indigo-500/10 text-indigo-400 p-5 rounded-2xl border border-indigo-400/20 group-hover:bg-indigo-500 group-hover:text-white transition-all duration-300">
+                              <div className="bg-indigo-50 text-indigo-600 p-5 rounded-2xl border border-indigo-200 group-hover:bg-indigo-600 group-hover:text-white transition-all duration-300">
                                 <ClipboardList className="w-8 h-8" />
                               </div>
-                              <span className="text-xs bg-indigo-500/15 text-indigo-300 px-4 py-1.5 rounded-full font-black border border-indigo-500/20 shadow-md">
+                              <span className="text-xs bg-indigo-50 text-indigo-800 px-4 py-1.5 rounded-full font-black border border-indigo-200">
                                 {customChecklists.filter(c => c.targetType === 'patient').length} چک‌لیست فعال
                               </span>
                             </div>
                             <div className="mt-8 relative z-10">
-                              <h3 className="text-lg sm:text-xl font-black text-white group-hover:text-indigo-300 transition-colors">چک‌لیست‌های خودارزیابی و پیگیری بیمار</h3>
-                              <p className="text-xs text-slate-300 font-bold mt-3 leading-relaxed">
+                              <h3 className="text-lg sm:text-xl font-black text-slate-900 group-hover:text-indigo-600 transition-colors">چک‌لیست‌های خودارزیابی و پیگیری بیمار</h3>
+                              <p className="text-xs text-slate-600 font-bold mt-3 leading-relaxed">
                                 چک‌لیست‌های خودمراقبتی هوشمند در منزل جهت ارزیابی علائم حیاتی، پایش روزانه وضعیت عمومی و هشدارهای سلامتی پس از ترخیص.
                               </p>
-                              <div className="mt-5 flex items-center gap-1.5 text-xs text-indigo-400 font-black group-hover:translate-x-1 transition-transform duration-300">
+                              <div className="mt-5 flex items-center gap-1.5 text-xs text-indigo-600 font-black group-hover:translate-x-1 transition-transform duration-300">
                                 <span>ورود و مدیریت چک‌لیست‌ها</span>
                                 <ChevronLeft className="w-4 h-4" />
                               </div>
@@ -9374,16 +9623,16 @@ export default function App() {
                         /* Listing View of Filtered Custom Checklists */
                         <div className="space-y-6 text-right font-sans">
                           {/* Subcategory selection header */}
-                          <div className="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center bg-white/5 border border-white/10 p-5 rounded-2xl">
+                          <div className="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center bg-white border border-slate-200 p-5 rounded-2xl shadow-sm">
                             <div className="flex items-center gap-2">
-                              <span className={`w-3.5 h-3.5 rounded-full animate-pulse ${selectedChecklistCategory === 'satisfaction' ? 'bg-amber-400' : 'bg-indigo-400'}`} />
-                              <span className="text-xs font-black text-white">
+                              <span className={`w-3.5 h-3.5 rounded-full animate-pulse ${selectedChecklistCategory === 'satisfaction' ? 'bg-amber-500' : 'bg-indigo-500'}`} />
+                              <span className="text-xs font-black text-slate-800">
                                 دسته‌بندی فعال: {selectedChecklistCategory === 'satisfaction' ? 'چک‌لیست‌های رضایت‌مندی بیمار' : 'چک‌لیست‌های خودمراقبتی و پیگیری بیمار'}
                               </span>
                             </div>
                             <button
                               onClick={() => setSelectedChecklistCategory(null)}
-                              className="bg-white/10 hover:bg-white/15 text-slate-200 hover:text-white border border-white/10 px-4 py-2.5 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center gap-1.5"
+                              className="bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 px-4 py-2.5 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center gap-1.5"
                             >
                               <span>بازگشت به دسته‌بندی‌ها</span>
                               <ChevronLeft className="w-4 h-4 rotate-180" />
@@ -9393,32 +9642,32 @@ export default function App() {
                           <div className="grid md:grid-cols-2 gap-6 text-right">
                             {/* Left Column: List */}
                             <div className="space-y-4 md:col-span-2">
-                              <h4 className="text-xs font-black text-slate-300 font-black">
+                              <h4 className="text-xs font-black text-slate-800">
                                 لیست فعال در این گروه ({customChecklists.filter(c => c.targetType === selectedChecklistCategory).length} چک‌لیست)
                               </h4>
                               <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
                                 {customChecklists.filter(c => c.targetType === selectedChecklistCategory).map(c => {
                                   const deptName = c.departmentId ? departments.find(d => d.id === c.departmentId)?.name : null;
                                   return (
-                                    <div key={c.id} className="bg-white/5 border border-white/10 hover:border-teal-500/30 rounded-[2rem] p-6 flex flex-col justify-between hover:bg-white/10 transition-all duration-300 shadow-xl group">
+                                    <div key={c.id} className="bg-white border border-slate-200 hover:border-teal-500 rounded-[2rem] p-6 flex flex-col justify-between hover:shadow-md transition-all duration-300 shadow-sm group">
                                       <div className="space-y-4">
                                         <div className="flex justify-between items-start gap-2">
                                           <span className={`text-[9px] px-2 py-1 rounded-md font-black border ${
                                             c.targetType === 'satisfaction'
-                                              ? 'bg-amber-500/10 text-amber-300 border-amber-500/20'
-                                              : 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20'
+                                              ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                              : 'bg-indigo-50 text-indigo-800 border-indigo-200'
                                           }`}>
                                             {c.targetType === 'satisfaction' ? 'نظرسنجی رضایت بیمار' : 'خودارزیابی خودمراقبتی بیمار'}
                                           </span>
-                                          <span className="text-[10px] bg-slate-800 text-slate-300 px-2 py-1 rounded-md font-mono font-bold shrink-0">
+                                          <span className="text-[10px] bg-slate-100 text-slate-700 border border-slate-200 px-2 py-1 rounded-md font-mono font-bold shrink-0">
                                             {c.questions.length} سوال
                                           </span>
                                         </div>
 
                                         <div>
-                                          <h5 className="text-sm font-black text-white group-hover:text-teal-300 transition-colors leading-relaxed">{c.title}</h5>
+                                          <h5 className="text-sm font-black text-slate-900 group-hover:text-teal-700 transition-colors leading-relaxed">{c.title}</h5>
                                           {deptName && (
-                                            <p className="text-[10px] text-teal-400 font-bold mt-1.5 flex items-center gap-1">
+                                            <p className="text-[10px] text-teal-700 font-bold mt-1.5 flex items-center gap-1">
                                               <span>• اختصاصی بخش:</span>
                                               <span className="underline">{deptName}</span>
                                             </p>
@@ -9426,26 +9675,26 @@ export default function App() {
                                         </div>
 
                                         {/* Questions Preview */}
-                                        <div className="bg-black/10 border border-white/5 p-3 rounded-xl max-h-[120px] overflow-y-auto space-y-1 text-right">
+                                        <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl max-h-[120px] overflow-y-auto space-y-1 text-right">
                                           {c.questions.map((q, qidx) => (
-                                            <p key={q.id} className="text-[10px] text-slate-300 font-medium truncate">
+                                            <p key={q.id} className="text-[10px] text-slate-600 font-medium truncate">
                                               {qidx + 1}. {q.text}
                                             </p>
                                           ))}
                                         </div>
                                       </div>
 
-                                      <div className="flex gap-2 mt-6 pt-4 border-t border-white/5 justify-end">
+                                      <div className="flex gap-2 mt-6 pt-4 border-t border-slate-200 justify-end">
                                         <button
                                           onClick={() => handleDeleteChecklist(c.id)}
-                                          className="text-rose-400 hover:text-white bg-rose-500/10 hover:bg-rose-500 px-3 py-2 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center gap-1"
+                                          className="text-rose-700 hover:text-white bg-rose-50 hover:bg-rose-600 px-3 py-2 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center gap-1 border border-rose-200"
                                         >
                                           <Trash2 className="w-3.5 h-3.5" />
                                           <span>حذف</span>
                                         </button>
                                         <button
                                           onClick={() => handleEditChecklistInit(c)}
-                                          className="text-teal-400 hover:text-white bg-teal-500/10 hover:bg-teal-500 px-4 py-2 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center gap-1"
+                                          className="text-teal-700 hover:text-white bg-teal-50 hover:bg-teal-600 px-4 py-2 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center gap-1 border border-teal-200"
                                         >
                                           <Edit3 className="w-3.5 h-3.5" />
                                           <span>ویرایش سوالات</span>
@@ -9455,10 +9704,10 @@ export default function App() {
                                   );
                                 })}
                                 {customChecklists.filter(c => c.targetType === selectedChecklistCategory).length === 0 && (
-                                  <div className="col-span-full bg-white/5 border border-white/10 rounded-2xl p-12 text-center">
-                                    <ClipboardList className="w-12 h-12 text-slate-500 mx-auto mb-3" />
-                                    <p className="text-sm font-black text-slate-300">هنوز هیچ چک‌لیستی در این دسته‌بندی ایجاد نشده است.</p>
-                                    <p className="text-xs text-slate-400 mt-1">با کلیک روی دکمه بالای صفحه، اولین چک‌لیست را اضافه نمایید.</p>
+                                  <div className="col-span-full bg-white border border-slate-200 rounded-2xl p-12 text-center">
+                                    <ClipboardList className="w-12 h-12 text-slate-400 mx-auto mb-3" />
+                                    <p className="text-sm font-black text-slate-700">هنوز هیچ چک‌لیستی در این دسته‌بندی ایجاد نشده است.</p>
+                                    <p className="text-xs text-slate-500 mt-1">با کلیک روی دکمه بالای صفحه، اولین چک‌لیست را اضافه نمایید.</p>
                                   </div>
                                 )}
                               </div>
@@ -9469,26 +9718,26 @@ export default function App() {
 
                       {/* HOSPITAL GENERAL SATISFACTION SURVEY EDITOR */}
                       {currentAdmin.role === 'super' && selectedChecklistCategory === 'satisfaction' && (
-                        <div className="bg-white/5 border border-white/10 rounded-[2.5rem] p-6 sm:p-8 shadow-2xl relative mt-8 space-y-6 text-right">
-                          <div className="border-b border-white/10 pb-4">
-                            <h4 className="text-base font-black text-white flex items-center gap-2">
-                              <HeartHandshake className="w-5 h-5 text-teal-400 animate-pulse" />
+                        <div className="bg-white border border-slate-200 rounded-[2.5rem] p-6 sm:p-8 shadow-sm relative mt-8 space-y-6 text-right">
+                          <div className="border-b border-slate-200 pb-4">
+                            <h4 className="text-base font-black text-slate-900 flex items-center gap-2">
+                              <HeartHandshake className="w-5 h-5 text-teal-600 animate-pulse" />
                               <span>مدیریت چک‌لیست رضایت‌سنجی جامع بیمارستان (صفحه ارزیابی بیمار)</span>
                             </h4>
-                            <p className="text-xs text-slate-300 font-medium mt-1">
+                            <p className="text-xs text-slate-600 font-medium mt-1">
                               در این بخش ادمین کل می‌تواند سوالات مربوط به «چک‌لیست ارزیابی رضایت‌مندی بیمار» را به صورت پویا ویرایش، حذف و اضافه نماید.
                             </p>
                           </div>
 
                           {/* Form to Add New Question to General Satisfaction Survey */}
-                          <div className="bg-[#121826] border border-white/5 p-4 rounded-2xl flex flex-col sm:flex-row gap-3 items-end">
+                          <div className="bg-slate-50 border border-slate-200 p-4 rounded-2xl flex flex-col sm:flex-row gap-3 items-end">
                             <div className="flex-grow w-full text-right">
-                              <label className="block text-[11px] font-bold text-slate-300 mb-2">افزودن سوال جدید به چک‌لیست رضایت‌سنجی جامع:</label>
+                              <label className="block text-[11px] font-bold text-slate-700 mb-2">افزودن سوال جدید به چک‌لیست رضایت‌سنجی جامع:</label>
                               <input
                                 type="text"
                                 placeholder="مثال: از نحوه پاسخ‌دهی کادر درمان به درخواست‌های شبانه رضایت کامل دارید."
                                 id="new_general_survey_question"
-                                className="w-full text-xs bg-white/5 border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-400/50 font-bold text-right"
+                                className="w-full text-xs bg-white border border-slate-300 text-slate-800 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-teal-500/20 font-bold text-right"
                               />
                             </div>
                             <button
@@ -9502,7 +9751,7 @@ export default function App() {
                                 saveHospitalSurveyQuestions(updated);
                                 input.value = '';
                               }}
-                              className="bg-teal-500 hover:bg-teal-600 text-white font-black px-5 py-3 rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                              className="bg-teal-600 hover:bg-teal-700 text-white font-black px-5 py-3 rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
                             >
                               <Plus className="w-4 h-4" />
                               <span>افزودن سوال</span>
@@ -9512,9 +9761,9 @@ export default function App() {
                           {/* Questions List */}
                           <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1">
                             {hospitalSurveyQuestions.map((q, qidx) => (
-                              <div key={q.id} className="bg-white/5 hover:bg-white/10 border border-white/5 rounded-2xl p-4 flex justify-between items-center gap-4 transition-all">
+                              <div key={q.id} className="bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-2xl p-4 flex justify-between items-center gap-4 transition-all">
                                 <div className="flex gap-3 items-center flex-grow">
-                                  <span className="bg-teal-500/10 text-teal-300 border border-teal-500/20 text-xs font-black px-2.5 py-1 rounded-lg">
+                                  <span className="bg-teal-50 text-teal-700 border border-teal-200 text-xs font-black px-2.5 py-1 rounded-lg">
                                     {qidx + 1}
                                   </span>
                                   <input
@@ -9524,7 +9773,7 @@ export default function App() {
                                       const updated = hospitalSurveyQuestions.map(item => item.id === q.id ? { ...item, text: e.target.value } : item);
                                       saveHospitalSurveyQuestions(updated);
                                     }}
-                                    className="bg-transparent border-b border-transparent hover:border-white/20 focus:border-teal-400 text-xs text-white font-semibold flex-grow py-1 outline-none transition-colors text-right"
+                                    className="bg-transparent border-b border-transparent hover:border-slate-300 focus:border-teal-500 text-xs text-slate-800 font-semibold flex-grow py-1 outline-none transition-colors text-right"
                                   />
                                 </div>
                                 <button
@@ -9533,7 +9782,7 @@ export default function App() {
                                     const updated = hospitalSurveyQuestions.filter(item => item.id !== q.id);
                                     saveHospitalSurveyQuestions(updated);
                                   }}
-                                  className="text-rose-400 hover:text-white bg-rose-500/10 hover:bg-rose-500 p-2 rounded-xl transition-all cursor-pointer"
+                                  className="text-rose-700 hover:text-white bg-rose-50 hover:bg-rose-600 p-2 rounded-xl transition-all cursor-pointer border border-rose-200"
                                   title="حذف سوال"
                                 >
                                   <Trash2 className="w-4 h-4" />
@@ -9548,27 +9797,27 @@ export default function App() {
                       {deletingChecklistId && (() => {
                         const targetChk = customChecklists.find(c => c.id === deletingChecklistId);
                         return (
-                          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm animate-fade-in">
-                            <div className="bg-[#111625] border border-white/10 rounded-[2rem] w-full max-w-md p-6 shadow-2xl relative text-right">
-                              <div className="w-12 h-12 bg-rose-500/10 border border-rose-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
-                                <Trash2 className="w-6 h-6 text-rose-400" />
+                          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+                            <div className="bg-white border border-slate-200 rounded-[2rem] w-full max-w-md p-6 shadow-xl relative text-right">
+                              <div className="w-12 h-12 bg-rose-50 border border-rose-200 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <Trash2 className="w-6 h-6 text-rose-600" />
                               </div>
-                              <h3 className="text-base font-black text-white mb-2 text-center">حذف چک‌لیست</h3>
-                              <p className="text-xs text-slate-300 font-medium leading-relaxed mb-6 text-center">
-                                آیا از حذف چک‌لیست <span className="text-rose-400 font-black">«{targetChk?.title}»</span> اطمینان کامل دارید؟ این اقدام غیرقابل بازگشت است.
+                              <h3 className="text-base font-black text-slate-900 mb-2 text-center">حذف چک‌لیست</h3>
+                              <p className="text-xs text-slate-600 font-medium leading-relaxed mb-6 text-center">
+                                آیا از حذف چک‌لیست <span className="text-rose-600 font-black">«{targetChk?.title}»</span> اطمینان کامل دارید؟ این اقدام غیرقابل بازگشت است.
                               </p>
                               <div className="flex items-center justify-center gap-3 font-sans">
                                 <button
                                   type="button"
                                   onClick={() => setDeletingChecklistId(null)}
-                                  className="bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 px-5 py-2.5 rounded-xl text-xs font-black transition-all cursor-pointer w-24"
+                                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-5 py-2.5 rounded-xl text-xs font-black transition-all cursor-pointer w-24"
                                 >
                                   انصراف
                                 </button>
                                 <button
                                   type="button"
                                   onClick={handleConfirmDeleteChecklist}
-                                  className="bg-rose-50 hover:bg-rose-600 text-white px-5 py-2.5 rounded-xl text-xs font-black shadow-lg shadow-rose-500/10 transition-all cursor-pointer w-24"
+                                  className="bg-rose-600 hover:bg-rose-700 text-white px-5 py-2.5 rounded-xl text-xs font-black shadow-sm transition-all cursor-pointer w-24"
                                 >
                                   تایید حذف
                                 </button>
@@ -9583,14 +9832,14 @@ export default function App() {
 
                   {/* TAB 8: COMPLAINTS & SUGGESTIONS */}
                   {adminTab === 'complaints' && (
-                    <div className="space-y-6 text-right">
-                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white/5 border border-white/10 rounded-[2.5rem] p-6 sm:p-8">
+                    <div className="space-y-6 text-right font-sans">
+                      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white border border-slate-200 rounded-[2.5rem] p-6 sm:p-8 shadow-sm">
                         <div>
-                          <h3 className="text-xl font-black text-white mb-1.5 flex items-center gap-2">
-                            <HeartHandshake className="w-6 h-6 text-emerald-400 animate-pulse" />
+                          <h3 className="text-xl font-black text-slate-900 mb-1.5 flex items-center gap-2">
+                            <HeartHandshake className="w-6 h-6 text-emerald-600 animate-pulse" />
                             <span>سامانه شکایت‌ها، پیشنهادها و رضایت‌سنجی</span>
                           </h3>
-                          <p className="text-xs text-slate-300 font-medium leading-relaxed">
+                          <p className="text-xs text-slate-600 font-medium leading-relaxed">
                             {currentAdmin.role === 'super'
                               ? 'نمایش جامع شکایات عمومی، نظرسنجی ترخیص بیمارستان و نظرسنجی‌های اختصاصی بخش‌های مختلف.'
                               : `نمایش شکایات عمومی بیمارستان و نظرسنجی‌های اختصاصی بخش ${departments.find(d => d.id === currentAdmin.departmentId)?.name || ''}`}
@@ -9598,7 +9847,7 @@ export default function App() {
                         </div>
                         <button
                           onClick={() => setAdminTab('overview')}
-                          className="bg-slate-800 hover:bg-slate-700 text-white border border-white/15 font-black px-5 py-3 rounded-2xl text-xs flex items-center gap-2 shadow-lg hover:scale-105 active:scale-95 transition-all duration-300 cursor-pointer"
+                          className="bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 font-black px-5 py-3 rounded-2xl text-xs flex items-center gap-2 shadow-sm transition-all duration-300 cursor-pointer"
                         >
                           <ArrowRight className="w-4 h-4" />
                           <span>بازگشت به منوی ادمین</span>
@@ -9606,13 +9855,13 @@ export default function App() {
                       </div>
 
                       {/* Sub-Tabs Switcher */}
-                      <div className="flex flex-wrap gap-2.5 bg-white/5 p-2 rounded-2xl border border-white/10">
+                      <div className="flex flex-wrap gap-2.5 bg-white p-2 rounded-2xl border border-slate-200 shadow-sm">
                         <button
                           onClick={() => setComplaintsSubTab('general')}
                           className={`flex-grow sm:flex-none text-xs font-black px-5 py-3 rounded-xl transition-all duration-300 cursor-pointer ${
                             complaintsSubTab === 'general'
-                              ? 'bg-gradient-to-r from-emerald-400 to-teal-500 text-slate-900 shadow-lg shadow-emerald-500/20 scale-[1.02]'
-                              : 'text-slate-300 hover:text-white hover:bg-white/5'
+                              ? 'bg-emerald-600 text-white shadow-sm'
+                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                           }`}
                         >
                           📋 شکایت‌ها و پیشنهادهای ثبت‌شده ({complaints.length})
@@ -9622,8 +9871,8 @@ export default function App() {
                           onClick={() => setComplaintsSubTab('hospital_survey')}
                           className={`flex-grow sm:flex-none text-xs font-black px-5 py-3 rounded-xl transition-all duration-300 cursor-pointer ${
                             complaintsSubTab === 'hospital_survey'
-                              ? 'bg-gradient-to-r from-emerald-400 to-teal-500 text-slate-900 shadow-lg shadow-emerald-500/20 scale-[1.02]'
-                              : 'text-slate-300 hover:text-white hover:bg-white/5'
+                              ? 'bg-emerald-600 text-white shadow-sm'
+                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                           }`}
                         >
                           🏥 نظرسنجی رضایت ترخیص بیمارستان ({patients.filter(p => p.satisfactionSurvey).length})
@@ -9633,8 +9882,8 @@ export default function App() {
                           onClick={() => setComplaintsSubTab('dept_survey')}
                           className={`flex-grow sm:flex-none text-xs font-black px-5 py-3 rounded-xl transition-all duration-300 cursor-pointer ${
                             complaintsSubTab === 'dept_survey'
-                              ? 'bg-gradient-to-r from-emerald-400 to-teal-500 text-slate-900 shadow-lg shadow-emerald-500/20 scale-[1.02]'
-                              : 'text-slate-300 hover:text-white hover:bg-white/5'
+                              ? 'bg-emerald-600 text-white shadow-sm'
+                              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                           }`}
                         >
                           🩺 نظرسنجی اختصاصی بخش‌ها ({
@@ -9649,29 +9898,29 @@ export default function App() {
                       {complaintsSubTab === 'general' && (
                         <div className="space-y-4">
                           {complaints.length === 0 ? (
-                            <div className="bg-white/5 border border-white/10 rounded-3xl p-12 text-center">
-                              <p className="text-sm text-slate-400 font-bold">هیچ شکایت یا پیشنهادی ثبت نشده است.</p>
+                            <div className="bg-white border border-slate-200 rounded-3xl p-12 text-center shadow-sm">
+                              <p className="text-sm text-slate-500 font-bold">هیچ شکایت یا پیشنهادی ثبت نشده است.</p>
                             </div>
                           ) : (
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                               {[...complaints].reverse().map(comp => (
-                                <div key={comp.id} className="bg-white/5 border border-white/10 rounded-3xl p-6 hover:border-emerald-500/50 transition-all flex flex-col justify-between">
+                                <div key={comp.id} className="bg-white border border-slate-200 rounded-3xl p-6 hover:border-emerald-500 transition-all shadow-sm flex flex-col justify-between">
                                   <div className="space-y-3">
                                     <div className="flex justify-between items-start gap-2">
-                                      <h4 className="text-sm font-black text-white">{comp.name || 'بیمار ناشناس'}</h4>
-                                      <span className="text-[10px] bg-white/5 text-slate-300 px-2 py-1 rounded-lg font-bold">
+                                      <h4 className="text-sm font-black text-slate-900">{comp.name || 'بیمار ناشناس'}</h4>
+                                      <span className="text-[10px] bg-slate-100 text-slate-700 px-2 py-1 rounded-lg font-bold border border-slate-200">
                                         🗓️ {comp.date || 'نامشخص'}
                                       </span>
                                     </div>
-                                    <div className="grid grid-cols-2 gap-2 text-xs font-bold text-slate-300 bg-[#111625] p-3 rounded-2xl border border-white/5">
+                                    <div className="grid grid-cols-2 gap-2 text-xs font-bold text-slate-700 bg-slate-50 p-3 rounded-2xl border border-slate-200">
                                       <span>📞 تلفن: {comp.phone || 'ثبت‌نشده'}</span>
                                       <span>🎂 سن: {comp.age ? `${comp.age} سال` : 'ثبت‌نشده'}</span>
                                     </div>
-                                    <p className="text-xs text-slate-200 leading-relaxed bg-white/5 p-4 rounded-2xl border border-white/5 text-justify">
+                                    <p className="text-xs text-slate-800 leading-relaxed bg-slate-50 p-4 rounded-2xl border border-slate-200 text-justify">
                                       {comp.description}
                                     </p>
                                   </div>
-                                  <div className="mt-4 pt-3 border-t border-white/5 text-[9px] text-slate-400 font-mono text-left">
+                                  <div className="mt-4 pt-3 border-t border-slate-100 text-[9px] text-slate-500 font-mono text-left">
                                     Submitted at: {new Date(comp.submittedAt).toLocaleString('fa-IR')}
                                   </div>
                                 </div>
@@ -9688,8 +9937,8 @@ export default function App() {
                             const surveyedPatients = patients.filter(p => p.satisfactionSurvey);
                             if (surveyedPatients.length === 0) {
                               return (
-                                <div className="bg-white/5 border border-white/10 rounded-3xl p-12 text-center">
-                                  <p className="text-sm text-slate-400 font-bold">هیچ نظرسنجی رضایت از خدماتی ثبت نشده است.</p>
+                                <div className="bg-white border border-slate-200 rounded-3xl p-12 text-center shadow-sm">
+                                  <p className="text-sm text-slate-500 font-bold">هیچ نظرسنجی رضایت از خدماتی ثبت نشده است.</p>
                                 </div>
                               );
                             }
@@ -9699,34 +9948,34 @@ export default function App() {
                                   const survey = p.satisfactionSurvey!;
                                   const dept = departments.find(d => d.id === p.departmentId);
                                   return (
-                                    <div key={p.nationalId} className="bg-white/5 border border-white/10 rounded-3xl p-6 hover:border-sky-500/50 transition-all flex flex-col justify-between">
+                                    <div key={p.nationalId} className="bg-white border border-slate-200 rounded-3xl p-6 hover:border-sky-500 transition-all shadow-sm flex flex-col justify-between">
                                       <div className="space-y-3">
                                         <div className="flex justify-between items-start">
                                           <div>
-                                            <h4 className="text-sm font-black text-white">{p.name}</h4>
-                                            <span className="text-[10px] text-slate-400 font-bold">بخش: {dept?.name || 'نامشخص'}</span>
+                                            <h4 className="text-sm font-black text-slate-900">{p.name || ('بیمار کد ' + (p.userCode || p.nationalId))}</h4>
+                                            <span className="text-[10px] text-slate-500 font-bold">بخش: {dept?.name || 'نامشخص'}</span>
                                           </div>
                                           <div className="flex flex-col items-end">
-                                            <span className="text-[10px] bg-white/5 text-slate-300 px-2.5 py-1 rounded-lg font-bold">
+                                            <span className="text-[10px] bg-slate-100 text-slate-700 px-2.5 py-1 rounded-lg font-bold border border-slate-200">
                                               ⭐ رضایت کلی: {survey.q18 || 'نامشخص'}
                                             </span>
                                           </div>
                                         </div>
 
-                                        <div className="grid grid-cols-1 gap-2 bg-[#111625] p-3 rounded-2xl border border-white/5 text-xs font-bold text-slate-300">
-                                          <p>🩺 کادر مورد رضایت: <span className="text-emerald-400">{survey.q19 || 'ثبت‌نشده'}</span></p>
-                                          <p className="truncate" title={survey.q20}>💡 پیشنهاد/انتقاد: <span className="text-slate-200">{survey.q20 || 'ثبت‌نشده'}</span></p>
+                                        <div className="grid grid-cols-1 gap-2 bg-slate-50 p-3 rounded-2xl border border-slate-200 text-xs font-bold text-slate-700">
+                                          <p>🩺 کادر مورد رضایت: <span className="text-emerald-700">{survey.q19 || 'ثبت‌نشده'}</span></p>
+                                          <p className="truncate" title={survey.q20}>💡 پیشنهاد/انتقاد: <span className="text-slate-800">{survey.q20 || 'ثبت‌نشده'}</span></p>
                                         </div>
                                       </div>
 
-                                      <div className="mt-4 pt-3 border-t border-white/5 flex justify-between items-center">
+                                      <div className="mt-4 pt-3 border-t border-slate-100 flex justify-between items-center">
                                         <button
                                           onClick={() => setSelectedSurveyPatient(p)}
-                                          className="text-[10px] bg-sky-500 hover:bg-sky-600 text-white font-black px-3 py-1.5 rounded-xl transition cursor-pointer"
+                                          className="text-[10px] bg-sky-600 hover:bg-sky-700 text-white font-black px-3 py-1.5 rounded-xl transition cursor-pointer shadow-sm"
                                         >
                                           📋 مشاهده تمام ۱۷ پاسخ
                                         </button>
-                                        <span className="text-[9px] text-slate-400 font-mono">
+                                        <span className="text-[9px] text-slate-500 font-mono">
                                           {new Date(survey.submittedAt).toLocaleString('fa-IR')}
                                         </span>
                                       </div>
@@ -10194,210 +10443,210 @@ export default function App() {
               exit={{ opacity: 0 }}
               className="max-w-4xl mx-auto px-4 py-8 text-right font-sans"
             >
-              {/* Back to Dashboard Button */}
+              {/* Back to Dashboard Button - High Contrast */}
               <button
                 type="button"
                 onClick={handleCancelEditPatient}
-                className="inline-flex items-center gap-2 bg-white hover:bg-slate-100 border border-slate-200 text-slate-800 text-xs font-black px-5 py-2.5 rounded-full transition-all duration-300 cursor-pointer shadow-sm mb-6"
+                className="inline-flex items-center gap-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-black px-5 py-2.5 rounded-full transition-all duration-300 cursor-pointer shadow-md mb-6 border border-slate-700 hover:scale-105 active:scale-95"
               >
-                <ArrowRight className="w-4 h-4 text-sky-600" />
+                <ArrowRight className="w-4 h-4 text-sky-400" />
                 <span>بازگشت به لیست بیماران</span>
               </button>
 
-              <div className="bg-[#111625] border border-white/10 rounded-[2.5rem] p-6 md:p-10 shadow-2xl relative">
-                <div className="flex justify-between items-center border-b border-white/10 pb-5 mb-6">
+              <div className="bg-white border border-slate-200/90 rounded-[2.5rem] p-6 md:p-10 shadow-xl relative text-slate-800">
+                <div className="flex justify-between items-center border-b border-slate-200 pb-5 mb-6">
                   <div className="flex items-center gap-3">
-                    <Edit className="w-6 h-6 text-sky-400 animate-pulse" />
-                    <h2 className="text-xl font-black text-white">ویرایش پرونده بیمار: {editingPatient.name}</h2>
+                    <Edit className="w-6 h-6 text-sky-600 animate-pulse" />
+                    <h2 className="text-xl font-black text-slate-900">ویرایش پرونده بیمار: {editingPatient.name}</h2>
                   </div>
-                  <span className="text-[10px] bg-sky-500/10 text-sky-400 border border-sky-500/20 px-3 py-1.5 rounded-full font-bold">
+                  <span className="text-xs bg-sky-50 text-sky-700 border border-sky-200 px-3.5 py-1.5 rounded-full font-bold">
                     شماره پرونده: {editingPatient.fileNumber}
                   </span>
                 </div>
 
                 <form onSubmit={handleUpdatePatient} className="space-y-6">
                   {patientCrudError && (
-                    <div className="bg-rose-950/30 border border-rose-500/30 text-rose-200 text-xs font-black p-4 rounded-2xl">
+                    <div className="bg-rose-50 border border-rose-200 text-rose-800 text-xs font-black p-4 rounded-2xl">
                       {patientCrudError}
                     </div>
                   )}
 
                   <div className="grid sm:grid-cols-2 gap-6">
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5 font-sans">نام و نام خانوادگی بیمار:</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5 font-sans">نام و نام خانوادگی بیمار:</label>
                       <input
                         type="text"
                         value={editPatientName}
                         onChange={(e) => setEditPatientName(e.target.value)}
-                        className="w-full text-xs bg-white/5 border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                        className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-900 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5">کد ملی بیمار:</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">کد ملی بیمار:</label>
                       <input
                         type="text"
                         value={editPatientNationalId}
                         onChange={(e) => setEditPatientNationalId(e.target.value)}
-                        className="w-full text-xs bg-white/5 border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold font-mono text-left"
+                        className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold font-mono text-left"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5">کد کاربری جهت ورود بیمار:</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">کد کاربری جهت ورود بیمار:</label>
                       <input
                         type="text"
                         value={editUserCode}
                         onChange={(e) => setEditUserCode(e.target.value)}
-                        className="w-full text-xs bg-white/5 border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold font-mono text-left"
+                        className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold font-mono text-left"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5">رمز ورود بیمار به سامانه:</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">رمز ورود بیمار به سامانه:</label>
                       <input
                         type="text"
                         value={editPassword}
                         onChange={(e) => setEditPassword(e.target.value)}
-                        className="w-full text-xs bg-white/5 border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold font-mono text-left"
+                        className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold font-mono text-left"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5">شماره پرونده بیمارستانی:</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">شماره پرونده بیمارستانی:</label>
                       <input
                         type="text"
                         value={editPatientFileNumber}
                         onChange={(e) => setEditPatientFileNumber(e.target.value)}
-                        className="w-full text-xs bg-white/5 border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold font-mono text-left"
+                        className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold font-mono text-left"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5">سن بیمار:</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">سن بیمار:</label>
                       <input
                         type="number"
                         value={editPatientAge}
                         onChange={(e) => setEditPatientAge(e.target.value)}
-                        className="w-full text-xs bg-white/5 border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                        className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5">شماره تماس بیمار:</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">شماره تماس بیمار:</label>
                       <input
                         type="text"
                         value={editPatientPhone}
                         onChange={(e) => setEditPatientPhone(e.target.value)}
-                        className="w-full text-xs bg-white/5 border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold text-left"
+                        className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold text-left"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5">تاریخ بستری (هجری شمسی):</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">تاریخ بستری (هجری شمسی):</label>
                       <ShamsiDatePicker
                         value={editAdmissionDate}
                         onChange={(val) => setEditAdmissionDate(val)}
                         placeholder="انتخاب تاریخ بستری..."
-                        isDark={true}
+                        isDark={false}
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5">بیماری ترخیص شده:</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">بیماری ترخیص شده:</label>
                       <input
                         type="text"
                         value={editPatientDiseaseName}
                         onChange={(e) => setEditPatientDiseaseName(e.target.value)}
-                        className="w-full text-xs bg-white/5 border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold"
+                        className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold"
                       />
                     </div>
 
                     <div className="sm:col-span-2">
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5">بخش بیمارستان:</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">بخش بیمارستان:</label>
                       <select
                         value={editPatientDeptId}
                         onChange={(e) => setEditPatientDeptId(e.target.value)}
                         disabled={currentAdmin?.role !== 'super'}
-                        className="w-full text-xs bg-[#111625] border border-white/10 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold cursor-pointer text-right disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold cursor-pointer text-right disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        <option value="" className="bg-[#111625] text-slate-400">-- انتخاب بخش --</option>
+                        <option value="" className="text-slate-400">-- انتخاب بخش --</option>
                         {departments
                           .filter(d => currentAdmin?.role === 'super' ? true : d.id === currentAdmin?.departmentId)
                           .map(d => (
-                            <option key={d.id} value={d.id} className="bg-[#111625] text-white font-bold">{d.name}</option>
+                            <option key={d.id} value={d.id} className="text-slate-900 font-bold">{d.name}</option>
                           ))}
                       </select>
                     </div>
 
-                    <div className="sm:col-span-2 bg-[#111625]/60 border border-sky-500/30 p-4 rounded-2xl space-y-2.5">
-                      <label className="block text-xs font-bold text-sky-300 flex items-center gap-2">
-                        <FlaskConical className="w-4 h-4 text-sky-400" />
+                    <div className="sm:col-span-2 bg-sky-50/70 border border-sky-200 p-4 rounded-2xl space-y-2.5">
+                      <label className="block text-xs font-bold text-sky-800 flex items-center gap-2">
+                        <FlaskConical className="w-4 h-4 text-sky-600" />
                         <span>دسته‌بندی بیماری‌های ویژه (جهت شاخص‌گیری بیمارستان):</span>
                       </label>
                       <select
                         value={editSpecialDisease}
                         onChange={(e) => setEditSpecialDisease(e.target.value)}
-                        className="w-full text-xs bg-[#111625] border border-sky-500/40 text-white rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/50 font-bold cursor-pointer"
+                        className="w-full text-xs bg-white border border-sky-300 text-slate-900 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/50 font-bold cursor-pointer"
                       >
                         {SPECIAL_DISEASES.map(d => (
-                          <option key={d} value={d} className="bg-[#111625] text-white font-bold">{d}</option>
+                          <option key={d} value={d} className="text-slate-900 font-bold">{d}</option>
                         ))}
                       </select>
-                      <p className="text-[10px] text-slate-400 font-medium leading-relaxed">
+                      <p className="text-[10px] text-slate-600 font-medium leading-relaxed">
                         * این فیلد جهت شاخص‌گیری بیمارستان استفاده می‌شود و در پنل بیمار نمایش داده نمی‌شود.
                       </p>
                     </div>
 
                     {/* EDIT TRIAGE LEVEL SELECTION */}
-                    <div className="sm:col-span-2 bg-[#111625]/80 border border-emerald-500/30 p-4 rounded-2xl space-y-3">
-                      <label className="block text-xs font-bold text-emerald-300 flex items-center gap-2">
-                        <Activity className="w-4 h-4 text-emerald-400" />
+                    <div className="sm:col-span-2 bg-emerald-50/70 border border-emerald-200 p-4 rounded-2xl space-y-3">
+                      <label className="block text-xs font-bold text-emerald-900 flex items-center gap-2">
+                        <Activity className="w-4 h-4 text-emerald-600" />
                         <span>ویرایش و تعیین وضعیت تریاژ بیمار (سطح قرمز، زرد و سبز):</span>
                       </label>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${editFollowupStatus === 'red' ? 'bg-rose-500/20 border-rose-500 text-rose-200' : 'bg-[#111625] border-white/10 text-slate-300 hover:bg-white/5'}`}>
+                        <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${editFollowupStatus === 'red' ? 'bg-rose-100 border-rose-400 text-rose-900 shadow-sm' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}>
                           <input
                             type="radio"
                             name="editTriageStatus"
                             value="red"
                             checked={editFollowupStatus === 'red'}
                             onChange={() => setEditFollowupStatus('red')}
-                            className="accent-rose-500 w-4 h-4"
+                            className="accent-rose-600 w-4 h-4"
                           />
                           <div>
-                            <span className="block text-xs font-black text-rose-300">سطح قرمز</span>
-                            <span className="text-[10px] text-slate-400">وضعیت هنوز کنترل نشده</span>
+                            <span className="block text-xs font-black text-rose-700">سطح قرمز</span>
+                            <span className="text-[10px] text-slate-500">وضعیت هنوز کنترل نشده</span>
                           </div>
                         </label>
 
-                        <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${editFollowupStatus === 'yellow' ? 'bg-amber-500/20 border-amber-500 text-amber-200' : 'bg-[#111625] border-white/10 text-slate-300 hover:bg-white/5'}`}>
+                        <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${editFollowupStatus === 'yellow' ? 'bg-amber-100 border-amber-400 text-amber-900 shadow-sm' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}>
                           <input
                             type="radio"
                             name="editTriageStatus"
                             value="yellow"
                             checked={editFollowupStatus === 'yellow'}
                             onChange={() => setEditFollowupStatus('yellow')}
-                            className="accent-amber-500 w-4 h-4"
+                            className="accent-amber-600 w-4 h-4"
                           />
                           <div>
-                            <span className="block text-xs font-black text-amber-300">سطح زرد</span>
-                            <span className="text-[10px] text-slate-400">وضعیت به صورت ناکافی کنترل شده</span>
+                            <span className="block text-xs font-black text-amber-700">سطح زرد</span>
+                            <span className="text-[10px] text-slate-500">وضعیت به صورت ناکافی کنترل شده</span>
                           </div>
                         </label>
 
-                        <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${editFollowupStatus === 'green' || (!editFollowupStatus && editFollowupStatus !== 'pending') ? 'bg-emerald-500/20 border-emerald-500 text-emerald-200' : 'bg-[#111625] border-white/10 text-slate-300 hover:bg-white/5'}`}>
+                        <label className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${editFollowupStatus === 'green' || (!editFollowupStatus && editFollowupStatus !== 'pending') ? 'bg-emerald-100 border-emerald-400 text-emerald-900 shadow-sm' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}>
                           <input
                             type="radio"
                             name="editTriageStatus"
                             value="green"
                             checked={editFollowupStatus === 'green' || (!editFollowupStatus && editFollowupStatus !== 'pending')}
                             onChange={() => setEditFollowupStatus('green')}
-                            className="accent-emerald-500 w-4 h-4"
+                            className="accent-emerald-600 w-4 h-4"
                           />
                           <div>
-                            <span className="block text-xs font-black text-emerald-300">سطح سبز</span>
-                            <span className="text-[10px] text-slate-400">وضعیت کنترل و در محدوده ایمن</span>
+                            <span className="block text-xs font-black text-emerald-700">سطح سبز</span>
+                            <span className="text-[10px] text-slate-500">وضعیت کنترل و در محدوده ایمن</span>
                           </div>
                         </label>
                       </div>
@@ -10405,25 +10654,25 @@ export default function App() {
 
                     <div className="sm:col-span-2 grid sm:grid-cols-2 gap-6">
                       <div>
-                        <label className="block text-[11px] font-bold text-slate-300 mb-1.5">آیا بیمار بستری مجدد در ماه اخیر می‌باشد؟</label>
-                        <div className="flex gap-6 items-center h-12 bg-[#111625]/50 border border-white/10 rounded-xl px-4">
-                          <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                        <label className="block text-xs font-bold text-slate-700 mb-1.5">آیا بیمار بستری مجدد در ماه اخیر می‌باشد؟</label>
+                        <div className="flex gap-6 items-center h-12 bg-slate-50 border border-slate-200 rounded-xl px-4">
+                          <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                             <input
                               type="radio"
                               name="editReadmission"
                               checked={editReadmissionRecentMonth === true}
                               onChange={() => setEditReadmissionRecentMonth(true)}
-                              className="accent-sky-500 w-4 h-4"
+                              className="accent-sky-600 w-4 h-4"
                             />
                             <span>بله</span>
                           </label>
-                          <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                          <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                             <input
                               type="radio"
                               name="editReadmission"
                               checked={editReadmissionRecentMonth === false}
                               onChange={() => setEditReadmissionRecentMonth(false)}
-                              className="accent-sky-500 w-4 h-4"
+                              className="accent-sky-600 w-4 h-4"
                             />
                             <span>خیر</span>
                           </label>
@@ -10431,19 +10680,19 @@ export default function App() {
                       </div>
 
                       <div>
-                        <label className="block text-[11px] font-bold text-slate-300 mb-1.5">آیا بیمار باردار است؟</label>
-                        <div className="flex gap-6 items-center h-12 bg-[#111625]/50 border border-white/10 rounded-xl px-4">
-                          <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                        <label className="block text-xs font-bold text-slate-700 mb-1.5">آیا بیمار باردار است؟</label>
+                        <div className="flex gap-6 items-center h-12 bg-slate-50 border border-slate-200 rounded-xl px-4">
+                          <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                             <input
                               type="radio"
                               name="editIsPregnant"
                               checked={editIsPregnant === true}
                               onChange={() => setEditIsPregnant(true)}
-                              className="accent-pink-500 w-4 h-4"
+                              className="accent-pink-600 w-4 h-4"
                             />
-                            <span className="text-pink-300">بله (باردار)</span>
+                            <span className="text-pink-700 font-extrabold">بله (باردار)</span>
                           </label>
-                          <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                          <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                             <input
                               type="radio"
                               name="editIsPregnant"
@@ -10452,7 +10701,7 @@ export default function App() {
                                 setEditIsPregnant(false);
                                 setEditIsHighRiskMother(false);
                               }}
-                              className="accent-pink-500 w-4 h-4"
+                              className="accent-pink-600 w-4 h-4"
                             />
                             <span>خیر</span>
                           </label>
@@ -10461,47 +10710,47 @@ export default function App() {
                     </div>
 
                     {editIsPregnant && (
-                      <div className="sm:col-span-2 bg-pink-950/20 border border-pink-500/30 p-4 rounded-2xl">
-                        <label className="block text-xs font-bold text-pink-200 mb-2 flex items-center gap-2 font-sans">
-                          <AlertTriangle className="w-4 h-4 text-amber-400 animate-pulse" />
+                      <div className="sm:col-span-2 bg-pink-50 border border-pink-200 p-4 rounded-2xl">
+                        <label className="block text-xs font-bold text-pink-900 mb-2 flex items-center gap-2 font-sans">
+                          <AlertTriangle className="w-4 h-4 text-amber-600 animate-pulse" />
                           <span>آیا بیمار مادر پرخطر است؟</span>
                         </label>
-                        <div className="flex gap-6 items-center h-12 bg-[#111625]/80 border border-pink-500/20 rounded-xl px-4">
-                          <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                        <div className="flex gap-6 items-center h-12 bg-white border border-pink-200 rounded-xl px-4">
+                          <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                             <input
                               type="radio"
                               name="editIsHighRiskMother"
                               checked={editIsHighRiskMother === true}
                               onChange={() => setEditIsHighRiskMother(true)}
-                              className="accent-rose-500 w-4 h-4"
+                              className="accent-rose-600 w-4 h-4"
                             />
-                            <span className="text-rose-300">بله (مادر پرخطر - پیگیری ویژه)</span>
+                            <span className="text-rose-700 font-black">بله (مادر پرخطر - پیگیری ویژه)</span>
                           </label>
-                          <label className="flex items-center gap-2 text-xs text-white font-bold cursor-pointer">
+                          <label className="flex items-center gap-2 text-xs text-slate-800 font-bold cursor-pointer">
                             <input
                               type="radio"
                               name="editIsHighRiskMother"
                               checked={editIsHighRiskMother === false}
                               onChange={() => setEditIsHighRiskMother(false)}
-                              className="accent-rose-500 w-4 h-4"
+                              className="accent-rose-600 w-4 h-4"
                             />
                             <span>خیر</span>
                           </label>
                         </div>
-                        <p className="text-[10px] text-pink-300/80 mt-2 font-medium">
+                        <p className="text-[10px] text-pink-800 mt-2 font-medium">
                           تغییر این وضعیت شاخص‌های غربالگری و پیگیری ویژه مادران باردار بیمارستان را به‌روزرسانی می‌کند.
                         </p>
                       </div>
                     )}
 
                     <div className="sm:col-span-2">
-                      <label className="block text-[11px] font-bold text-slate-300 mb-1.5">توضیح جهت راهنمایی بیمار:</label>
+                      <label className="block text-xs font-bold text-slate-700 mb-1.5">توضیح جهت راهنمایی بیمار:</label>
                       <textarea
                         placeholder="توضیحات راهنمایی بیمار جهت نمایش در پورتال..."
                         value={editGuidanceNotes}
                         onChange={(e) => setEditGuidanceNotes(e.target.value)}
                         rows={4}
-                        className="w-full text-xs bg-[#111625] border border-white/10 text-white placeholder:text-slate-500 rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-sky-500/40 focus:border-sky-400/50 font-bold resize-none"
+                        className="w-full text-xs bg-slate-50 border border-slate-300 text-slate-900 placeholder:text-slate-400 rounded-xl px-4 py-3 outline-none focus:bg-white focus:ring-2 focus:ring-sky-500/40 focus:border-sky-500 font-bold resize-none"
                       />
                     </div>
 
@@ -10882,12 +11131,18 @@ export default function App() {
                   const res = await fetchHospitalDataFromSupabase();
                   if (res.success && res.data) {
                     if (res.data.patients) {
-                      setPatients(res.data.patients);
-                      safeLocalStorageSet('hospital_patients', JSON.stringify(res.data.patients));
+                      setPatients(prevLocal => {
+                        const merged = mergePatientArrays(prevLocal, res.data!.patients);
+                        safeLocalStorageSet('hospital_patients', JSON.stringify(merged));
+                        return merged;
+                      });
                     }
                     if (res.data.messages) {
-                      setMessages(res.data.messages);
-                      safeLocalStorageSet('hospital_messages', JSON.stringify(res.data.messages));
+                      setMessages(prevLocal => {
+                        const merged = mergeMessageArrays(prevLocal, res.data!.messages);
+                        safeLocalStorageSet('hospital_messages', JSON.stringify(merged));
+                        return merged;
+                      });
                     }
                     if (res.data.complaints) {
                       setComplaints(res.data.complaints);
