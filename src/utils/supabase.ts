@@ -335,24 +335,37 @@ export async function fetchHospitalDataFromSupabase(): Promise<{
         const { data: pRows } = await supabase.from('hospital_patients').select('*');
         if (pRows && pRows.length > 0) {
           patients = pRows.map((r: any) => {
+            let parsed: any = {};
             if (r.data_json) {
-              try { return JSON.parse(r.data_json); } catch (e) {}
+              try { parsed = JSON.parse(r.data_json); } catch (e) {}
             }
+            const natId = r.national_id || parsed.nationalId || r.id || '';
+            const uCode = parsed.userCode || natId;
+            const nameVal = (r.name || parsed.name || '').trim() || `بیمار کد ${uCode}`;
             return {
-              nationalId: r.national_id || r.id || '',
-              fileNumber: r.file_number || '',
-              name: r.name || '',
-              age: r.age || 0,
-              phone: r.phone || '',
-              departmentId: r.department_id || '',
-              diseaseId: r.disease_id || '',
-              followupStatus: r.followup_status || 'pending',
-              dischargeDate: r.discharge_date || '',
-              registeredAt: r.registered_at || ''
+              ...parsed,
+              nationalId: natId,
+              userCode: uCode,
+              fileNumber: r.file_number || parsed.fileNumber || '',
+              name: nameVal,
+              age: r.age || parsed.age || 0,
+              phone: r.phone || parsed.phone || '',
+              departmentId: r.department_id || parsed.departmentId || '',
+              diseaseId: r.disease_id || parsed.diseaseId || '',
+              followupStatus: r.followup_status || parsed.followupStatus || 'pending',
+              dischargeDate: r.discharge_date || parsed.dischargeDate || '',
+              registeredAt: r.registered_at || parsed.registeredAt || new Date().toISOString()
             } as Patient;
           });
         }
       } catch (e) {}
+    }
+
+    if (patients) {
+      patients = patients.map(p => ({
+        ...p,
+        name: (p.name && p.name.trim()) ? p.name : `بیمار کد ${p.userCode || p.nationalId || 'نامشخص'}`
+      }));
     }
 
     let diseases: Disease[] | undefined = data?.diseases_json ? JSON.parse(data.diseases_json) : undefined;
@@ -399,6 +412,156 @@ export async function fetchHospitalDataFromSupabase(): Promise<{
       message: 'خطا در دریافت اطلاعات از Supabase: ' + (err?.message || 'خطای شبکه')
     };
   }
+}
+
+/**
+ * Safely merges two lists of messages without losing local or remote items.
+ */
+export function mergeMessageArrays(listA: Message[] = [], listB: Message[] = []): Message[] {
+  const map = new Map<string, Message>();
+
+  const mergeTwo = (m1: Message, m2: Message): Message => {
+    return {
+      id: m1.id,
+      patientId: m1.patientId || m2.patientId || '',
+      patientName: m1.patientName || m2.patientName || '',
+      departmentId: m1.departmentId || m2.departmentId || '',
+      question: m1.question || m2.question || '',
+      askedAt: m1.askedAt || m2.askedAt || new Date().toISOString(),
+      patientFileName: m1.patientFileName || m2.patientFileName,
+      patientFileUrl: m1.patientFileUrl || m2.patientFileUrl,
+      answer: m1.answer || m2.answer,
+      answeredAt: m1.answeredAt || m2.answeredAt,
+      answeredBy: m1.answeredBy || m2.answeredBy,
+      adminFileName: m1.adminFileName || m2.adminFileName,
+      adminFileUrl: m1.adminFileUrl || m2.adminFileUrl
+    };
+  };
+
+  [...listA, ...listB].forEach(msg => {
+    if (!msg || !msg.id) return;
+    if (!map.has(msg.id)) {
+      map.set(msg.id, msg);
+    } else {
+      const existing = map.get(msg.id)!;
+      map.set(msg.id, mergeTwo(existing, msg));
+    }
+  });
+
+  return Array.from(map.values()).sort((a, b) => {
+    const timeA = new Date(a.askedAt).getTime() || 0;
+    const timeB = new Date(b.askedAt).getTime() || 0;
+    return timeB - timeA;
+  });
+}
+
+/**
+ * Safely merges two lists of patients without losing local or remote data.
+ */
+export function mergePatientArrays(listA: Patient[] = [], listB: Patient[] = []): Patient[] {
+  const map = new Map<string, Patient>();
+
+  const mergeTwo = (p1: Patient, p2: Patient): Patient => {
+    const p1NameValid = p1.name && p1.name.trim().length > 0;
+    const p2NameValid = p2.name && p2.name.trim().length > 0;
+    const name = p1NameValid ? p1.name : (p2NameValid ? p2.name : `بیمار کد ${p1.userCode || p1.nationalId || p2.userCode || p2.nationalId || 'نامشخص'}`);
+
+    return {
+      ...p2,
+      ...p1,
+      name,
+      userCode: p1.userCode || p2.userCode || p1.nationalId || p2.nationalId,
+      password: p1.password || p2.password,
+      fileNumber: p1.fileNumber || p2.fileNumber,
+      phone: p1.phone || p2.phone,
+      departmentId: p1.departmentId || p2.departmentId,
+      diseaseId: p1.diseaseId || p2.diseaseId,
+      followupStatus: p1.followupStatus || p2.followupStatus || 'pending',
+      dischargeDate: p1.dischargeDate || p2.dischargeDate,
+      registeredAt: p1.registeredAt || p2.registeredAt || new Date().toISOString(),
+      surveySubmitted: p1.surveySubmitted ?? p2.surveySubmitted,
+      surveyHospitalizationSatisfaction: p1.surveyHospitalizationSatisfaction ?? p2.surveyHospitalizationSatisfaction,
+      satisfactionSurvey: p1.satisfactionSurvey ?? p2.satisfactionSurvey,
+      isPregnant: p1.isPregnant ?? p2.isPregnant,
+      isHighRiskMother: p1.isHighRiskMother ?? p2.isHighRiskMother,
+      guidanceNotes: p1.guidanceNotes || p2.guidanceNotes,
+      hashtaggedDiseaseIds: p1.hashtaggedDiseaseIds || p2.hashtaggedDiseaseIds
+    };
+  };
+
+  [...listB, ...listA].forEach(p => {
+    if (!p) return;
+    const id = p.nationalId || p.userCode;
+    if (!id) return;
+
+    const normalizedPatient: Patient = {
+      ...p,
+      name: (p.name && p.name.trim()) ? p.name : `بیمار کد ${p.userCode || p.nationalId || 'نامشخص'}`
+    };
+
+    if (!map.has(id)) {
+      map.set(id, normalizedPatient);
+    } else {
+      const existing = map.get(id)!;
+      map.set(id, mergeTwo(normalizedPatient, existing));
+    }
+  });
+
+  return Array.from(map.values());
+}
+
+/**
+ * Fast real-time fetcher for chat messages from Supabase.
+ */
+export async function fetchMessagesFromSupabase(): Promise<Message[] | null> {
+  let tableMsgs: Message[] = [];
+  let snapshotMsgs: Message[] = [];
+
+  try {
+    // 1. First attempt to load directly from hospital_messages
+    const { data: mRows, error: mError } = await supabase
+      .from('hospital_messages')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (!mError && mRows && mRows.length > 0) {
+      tableMsgs = mRows.map((r: any) => {
+        if (r.data_json) {
+          try {
+            const parsed = JSON.parse(r.data_json);
+            if (parsed && typeof parsed === 'object') return parsed;
+          } catch (e) {}
+        }
+        return {
+          id: r.id,
+          patientId: r.sender_name || '',
+          patientName: r.sender_name || '',
+          departmentId: r.target_group || '',
+          question: r.content || r.title || '',
+          askedAt: r.created_at || new Date().toISOString()
+        } as Message;
+      });
+    }
+
+    // 2. Load from main hospital snapshot
+    const { data: snapshot, error: sError } = await supabase
+      .from('hospital_cloud_sync')
+      .select('messages_json')
+      .eq('id', 'main_hospital_snapshot')
+      .maybeSingle();
+
+    if (!sError && snapshot?.messages_json) {
+      try {
+        snapshotMsgs = JSON.parse(snapshot.messages_json) as Message[];
+      } catch (e) {}
+    }
+
+    const merged = mergeMessageArrays(tableMsgs, snapshotMsgs);
+    return merged.length > 0 ? merged : null;
+  } catch (err) {
+    console.warn('Error fetching messages from Supabase:', err);
+  }
+  return null;
 }
 
 /**
