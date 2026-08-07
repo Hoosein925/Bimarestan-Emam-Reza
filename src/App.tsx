@@ -4756,18 +4756,18 @@ export default function App() {
                         <span>بازگشت به پنل کاربری</span>
                       </button>
 
-                      <div className="flex flex-col h-[600px] bg-slate-50 rounded-[2rem] border border-slate-200 overflow-hidden relative shadow-md">
-                    {/* Chat Header */}
-                    <div className="bg-slate-100 p-4 border-b border-slate-200 flex items-center justify-between">
+                      <div className="flex flex-col h-[600px] bg-[#efeae2] rounded-[2rem] border border-[#d1c7b7] overflow-hidden relative shadow-md">
+                    {/* Chat Header - WhatsApp Teal Bar */}
+                    <div className="bg-[#075e54] p-4 text-white border-b border-[#004d40] flex items-center justify-between shadow-sm">
                       <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center justify-center">
-                          <MessageSquare className="w-5 h-5 text-indigo-600" />
+                        <div className="w-10 h-10 rounded-full bg-white/20 border border-white/30 flex items-center justify-center shrink-0">
+                          <MessageSquare className="w-5 h-5 text-white" />
                         </div>
                         <div>
-                          <h4 className="text-sm font-black text-slate-800">گفتگو با کادر درمان بیمارستان</h4>
-                          <span className="text-[10px] text-emerald-600 flex items-center gap-1 font-bold mt-0.5">
-                            <span className="w-2 h-2 bg-emerald-500 rounded-full animate-ping shrink-0" />
-                            <span>همگام‌سازی لحظه‌ای چت فعال است (ارسال و دریافت زنده)</span>
+                          <h4 className="text-sm font-black text-white">گفتگو با کادر درمان بیمارستان</h4>
+                          <span className="text-[10px] text-emerald-200 flex items-center gap-1 font-bold mt-0.5">
+                            <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse shrink-0" />
+                            <span>همگام‌سازی آنلاین فعال است (ارسال و دریافت زنده)</span>
                           </span>
                         </div>
                       </div>
@@ -4784,55 +4784,55 @@ export default function App() {
                               });
                             }
                           }}
-                          className="text-[11px] bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-bold flex items-center gap-1 cursor-pointer shadow-sm transition-all active:scale-95"
+                          className="text-[11px] bg-white/15 hover:bg-white/25 border border-white/25 text-white px-3 py-1.5 rounded-xl font-bold flex items-center gap-1 cursor-pointer shadow-sm transition-all active:scale-95"
                           title="بروزرسانی پیام‌ها"
                         >
-                          <RotateCcw className="w-3.5 h-3.5 text-indigo-600" />
+                          <RotateCcw className="w-3.5 h-3.5 text-white" />
                           <span>بروزرسانی</span>
                         </button>
-                        <span className="text-[11px] bg-white border border-slate-200 text-slate-700 px-3 py-1.5 rounded-xl font-mono font-black">
+                        <span className="text-[11px] bg-white/15 border border-white/25 text-white px-3 py-1.5 rounded-xl font-mono font-black">
                           تعداد پیام‌ها: {messages.filter(m => m.patientId === currentUser.nationalId).length}
                         </span>
                       </div>
                     </div>
 
                     {/* Chat Messages Stream (WhatsApp Timeline Style) */}
-                    <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 flex flex-col-reverse bg-slate-50 border-y border-slate-200">
+                    <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 flex flex-col-reverse bg-[#efeae2] border-y border-[#d1c7b7]">
                       {/* Sort messages from newest to oldest since flex-col-reverse will render them correctly from bottom to top */}
                       {[...messages]
                         .filter(m => m.patientId === currentUser.nationalId)
                         .sort((a, b) => new Date(b.askedAt).getTime() - new Date(a.askedAt).getTime())
                         .map((msg) => (
                           <React.Fragment key={msg.id}>
-                            {/* 2. Doctor Response (Rendered above in flex-col-reverse timeline if answered) */}
+                            {/* 2. Doctor Response (Rendered above in flex-col-reverse timeline if answered - White Bubble) */}
                             {msg.answer && (
                               <div className="flex justify-start my-1">
                                 <div className="max-w-[85%] md:max-w-[70%] space-y-1">
-                                  <div className="bg-white text-slate-800 rounded-2xl rounded-tl-none p-4 shadow-md border border-slate-200/80">
-                                    <div className="flex justify-between items-center text-[11px] text-indigo-600 font-black mb-1.5 pb-1 border-b border-slate-100">
+                                  <div className="bg-white text-[#111b21] rounded-2xl rounded-tl-none p-4 shadow-sm border border-[#e1dcd5]">
+                                    <div className="flex justify-between items-center text-[11px] text-[#008069] font-black mb-1.5 pb-1 border-b border-slate-100">
                                       <span className="flex items-center gap-1.5">
                                         <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                                         <span>پاسخ {msg.answeredBy || 'کادر درمان بخش'}</span>
                                       </span>
-                                      <span className="font-mono text-[9px] text-slate-400 font-normal">
+                                      <span className="font-mono text-[9px] text-[#667781] font-bold">
                                         {msg.answeredAt ? new Date(msg.answeredAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' }) : ''}
                                       </span>
                                     </div>
-                                    <p className="text-xs md:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-slate-800 text-justify">
+                                    <p className="text-xs md:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-[#111b21] text-justify">
                                       {msg.answer}
                                     </p>
 
                                     {/* Attached file (Admin) */}
                                     {msg.adminFileName && msg.adminFileUrl && (
-                                      <div className="mt-2.5 flex items-center justify-between gap-3 bg-indigo-50/70 p-2 rounded-xl border border-indigo-100">
+                                      <div className="mt-2.5 flex items-center justify-between gap-3 bg-[#f0f2f5] p-2 rounded-xl border border-[#e1dcd5]">
                                         <div className="flex items-center gap-1.5 min-w-0">
-                                          <Paperclip className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                                          <span className="text-[10px] text-slate-700 font-bold truncate max-w-[130px]">{msg.adminFileName}</span>
+                                          <Paperclip className="w-3.5 h-3.5 text-[#008069] shrink-0" />
+                                          <span className="text-[10px] text-[#111b21] font-bold truncate max-w-[130px]">{msg.adminFileName}</span>
                                         </div>
                                         <a
                                           href={msg.adminFileUrl}
                                           download={msg.adminFileName}
-                                          className="bg-indigo-600 hover:bg-indigo-700 text-white text-[9px] px-2.5 py-1 rounded-lg font-black cursor-pointer transition-colors shrink-0"
+                                          className="bg-[#00a884] hover:bg-[#008f70] text-white text-[9px] px-2.5 py-1 rounded-lg font-black cursor-pointer transition-colors shrink-0"
                                         >
                                           دانلود فایل
                                         </a>
@@ -4843,31 +4843,31 @@ export default function App() {
                               </div>
                             )}
 
-                            {/* 1. Patient Message (On Right) */}
+                            {/* 1. Patient Message (On Right - Light Green Bubble) */}
                             <div className="flex justify-end my-1">
                               <div className="max-w-[85%] md:max-w-[70%] space-y-1">
-                                <div className="bg-indigo-600 text-white rounded-2xl rounded-tr-none p-4 shadow-md border border-indigo-700">
-                                  <div className="flex justify-between items-center text-[10px] text-indigo-200 mb-1.5 font-bold pb-1 border-b border-indigo-500/30">
+                                <div className="bg-[#d9fdd3] text-[#111b21] rounded-2xl rounded-tr-none p-4 shadow-sm border border-[#b2e2a8]">
+                                  <div className="flex justify-between items-center text-[10px] text-[#005c4b] mb-1.5 font-black pb-1 border-b border-[#9fd794]/40">
                                     <span>پیام شما ({currentUser.name})</span>
-                                    <span className="font-mono text-[9px] text-indigo-200">
+                                    <span className="font-mono text-[9px] text-[#54656f] font-bold">
                                       {new Date(msg.askedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}
                                     </span>
                                   </div>
-                                  <p className="text-xs md:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-justify">
+                                  <p className="text-xs md:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-[#111b21] text-justify">
                                     {msg.question}
                                   </p>
 
                                   {/* Attached file (Patient) */}
                                   {msg.patientFileName && msg.patientFileUrl && (
-                                    <div className="mt-2.5 flex items-center justify-between gap-3 bg-black/20 p-2 rounded-xl border border-white/10">
+                                    <div className="mt-2.5 flex items-center justify-between gap-3 bg-[#c2f3b8] p-2 rounded-xl border border-[#9fd794]">
                                       <div className="flex items-center gap-1.5 min-w-0">
-                                        <Paperclip className="w-3.5 h-3.5 text-indigo-200 shrink-0" />
-                                        <span className="text-[10px] text-slate-100 font-bold truncate max-w-[130px]">{msg.patientFileName}</span>
+                                        <Paperclip className="w-3.5 h-3.5 text-[#005c4b] shrink-0" />
+                                        <span className="text-[10px] text-[#111b21] font-bold truncate max-w-[130px]">{msg.patientFileName}</span>
                                       </div>
                                       <a
                                         href={msg.patientFileUrl}
                                         download={msg.patientFileName}
-                                        className="bg-indigo-500 hover:bg-indigo-400 text-white text-[9px] px-2.5 py-1 rounded-lg font-black cursor-pointer transition-colors shrink-0"
+                                        className="bg-[#008069] hover:bg-[#006a57] text-white text-[9px] px-2.5 py-1 rounded-lg font-black cursor-pointer transition-colors shrink-0"
                                       >
                                         دانلود فایل
                                       </a>
@@ -4880,21 +4880,21 @@ export default function App() {
                         ))}
 
                       {messages.filter(m => m.patientId === currentUser.nationalId).length === 0 && (
-                        <div className="text-center py-20 text-slate-400 flex flex-col items-center justify-center gap-3">
-                          <MessageSquare className="w-12 h-12 text-slate-300" />
+                        <div className="text-center py-20 text-slate-500 flex flex-col items-center justify-center gap-3">
+                          <MessageSquare className="w-12 h-12 text-[#8696a0]" />
                           <div className="space-y-1">
-                            <p className="text-sm font-black text-slate-700">هنوز گفتگویی آغاز نشده است.</p>
-                            <p className="text-[11px] text-slate-500 font-semibold">سوال خود را در فیلد زیر تایپ و ارسال کنید تا کادر درمان بخش پاسخ دهد.</p>
+                            <p className="text-sm font-black text-[#111b21]">هنوز گفتگویی آغاز نشده است.</p>
+                            <p className="text-[11px] text-[#54656f] font-semibold">سوال خود را در فیلد زیر تایپ و ارسال کنید تا کادر درمان بخش پاسخ دهد.</p>
                           </div>
                         </div>
                       )}
                     </div>
 
-                    {/* Chat Input Bar */}
-                    <form onSubmit={handleAskQuestion} className="p-4 bg-slate-50 border-t border-slate-200 space-y-3">
+                    {/* Chat Input Bar - WhatsApp Style */}
+                    <form onSubmit={handleAskQuestion} className="p-3.5 bg-[#f0f2f5] border-t border-[#d1c7b7] space-y-3">
                       {/* Attachment Status Indicator */}
                       {newQuestionFileName && (
-                        <div className="flex items-center gap-2.5 bg-indigo-50 border border-indigo-200 px-3 py-2 rounded-xl text-xs text-indigo-700 w-fit">
+                        <div className="flex items-center gap-2.5 bg-[#d9fdd3] border border-[#b2e2a8] px-3 py-2 rounded-xl text-xs text-[#005c4b] w-fit">
                           <Paperclip className="w-3.5 h-3.5" />
                           <span className="font-bold truncate max-w-[200px]">{newQuestionFileName}</span>
                           <button
@@ -4911,14 +4911,14 @@ export default function App() {
                       )}
 
                       <div className="flex items-center gap-2.5">
-                        {/* Hidden File Input */}
-                        <label className="flex items-center justify-center p-3 rounded-xl bg-white hover:bg-slate-100 text-slate-600 cursor-pointer border border-slate-200 transition-colors shrink-0 shadow-sm">
+                        {/* Hidden File Input Trigger */}
+                        <label className="flex items-center justify-center p-3 rounded-xl bg-white hover:bg-slate-100 text-[#54656f] cursor-pointer border border-[#d1c7b7] transition-colors shrink-0 shadow-sm">
                           <input
                             type="file"
                             className="hidden"
                             onChange={handlePatientFileChange}
                           />
-                          <Paperclip className="w-5 h-5 text-indigo-600" />
+                          <Paperclip className="w-5 h-5 text-[#008069]" />
                         </label>
 
                         {/* Input Field */}
@@ -4926,15 +4926,15 @@ export default function App() {
                           type="text"
                           value={newQuestionText}
                           onChange={(e) => setNewQuestionText(e.target.value)}
-                          placeholder="پیام خود را به کادر درمان بنویسید..."
-                          className="flex-1 min-w-0 bg-white text-slate-800 rounded-xl px-4 py-3 text-xs md:text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 border border-slate-200 font-bold placeholder:text-slate-400 shadow-sm"
+                          placeholder="پیام خود را بنویسید..."
+                          className="flex-1 min-w-0 bg-white text-[#111b21] rounded-xl px-4 py-3 text-xs md:text-sm focus:outline-none focus:ring-2 focus:ring-[#00a884]/30 border border-[#d1c7b7] font-bold placeholder:text-[#8696a0] shadow-sm"
                         />
 
                         {/* Send Button */}
                         <button
                           type="submit"
                           disabled={!newQuestionText.trim()}
-                          className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:hover:bg-indigo-600 text-white font-black px-4 md:px-5 py-3 rounded-xl text-xs md:text-sm flex items-center gap-1.5 md:gap-2 transition-all cursor-pointer shadow-md active:scale-95 shrink-0"
+                          className="bg-[#00a884] hover:bg-[#008f70] disabled:opacity-40 disabled:hover:bg-[#00a884] text-white font-black px-4 md:px-5 py-3 rounded-xl text-xs md:text-sm flex items-center gap-1.5 md:gap-2 transition-all cursor-pointer shadow-md active:scale-95 shrink-0"
                         >
                           <span className="hidden sm:inline">ارسال پیام</span>
                           <span className="sm:hidden">ارسال</span>
@@ -5402,8 +5402,8 @@ export default function App() {
                   </div>
                 </div>
               ) : (
-                /* Inside a specific workstation page with a soft, non-white light medical slate background (#e8eff7) */
-                <div className="bg-[#e8eff7] text-slate-900 border border-slate-300 shadow-xl rounded-2xl sm:rounded-[2.5rem] p-3 sm:p-8 space-y-6 sm:space-y-8 relative overflow-x-hidden w-full max-w-full">
+                /* Inside a specific workstation page with a warm, beautiful cream background (#faf6ed) */
+                <div className="bg-[#faf6ed] text-slate-900 border border-[#e2d7c3] shadow-xl rounded-2xl sm:rounded-[2.5rem] p-3 sm:p-8 space-y-6 sm:space-y-8 relative overflow-x-hidden w-full max-w-full">
                   {/* Decorative backdrop container safely masked to card borders */}
                   <div className="absolute inset-0 rounded-[2.5rem] overflow-hidden pointer-events-none z-0">
                     <div className="absolute top-0 right-0 w-64 h-64 bg-gradient-to-br from-indigo-500/10 via-sky-500/10 to-transparent rounded-full blur-3xl pointer-events-none" />
@@ -7994,18 +7994,18 @@ export default function App() {
                     const activePatientDisease = activePatientInfo ? diseases.find(d => d.id === activePatientInfo.diseaseId) : null;
 
                     return (
-                      <div className="h-[620px] rounded-3xl border border-slate-200 overflow-hidden bg-white flex flex-col md:flex-row shadow-sm">
+                      <div className="h-[620px] rounded-3xl border border-[#d1c7b7] overflow-hidden bg-[#efeae2] flex flex-col md:flex-row shadow-sm">
 
                         {/* Right / List Column: Patients Thread List */}
-                        <div className={`w-full md:w-80 border-l border-slate-200 flex flex-col bg-slate-50 shrink-0 ${activeChatPatientId ? 'hidden md:flex' : 'flex'}`}>
+                        <div className={`w-full md:w-80 border-l border-[#d1c7b7] flex flex-col bg-[#f0f2f5] shrink-0 ${activeChatPatientId ? 'hidden md:flex' : 'flex'}`}>
                           {/* Search & Header */}
-                          <div className="p-4 border-b border-slate-200 space-y-3">
+                          <div className="p-4 border-b border-[#d1c7b7] bg-[#075e54] text-white space-y-3">
                             <div className="flex items-center justify-between">
-                              <h3 className="text-sm font-black text-slate-900 flex items-center gap-2">
-                                <MessageSquare className="w-4 h-4 text-sky-600" />
+                              <h3 className="text-sm font-black text-white flex items-center gap-2">
+                                <MessageSquare className="w-4 h-4 text-emerald-300" />
                                 <span>گفتگوهای پزشکی</span>
                                 {messages.filter(m => !m.answer && (currentAdmin.role === 'super' ? true : m.departmentId === currentAdmin.departmentId)).length > 0 && (
-                                  <span className="bg-rose-600 text-white text-[9px] font-black px-2 py-0.5 rounded-full animate-pulse">
+                                  <span className="bg-rose-500 text-white text-[9px] font-black px-2 py-0.5 rounded-full animate-pulse">
                                     {messages.filter(m => !m.answer && (currentAdmin.role === 'super' ? true : m.departmentId === currentAdmin.departmentId)).length} جدید
                                   </span>
                                 )}
@@ -8022,42 +8022,42 @@ export default function App() {
                                     });
                                   }
                                 }}
-                                className="text-[10px] bg-slate-200 hover:bg-slate-300 text-sky-800 border border-sky-300 px-2.5 py-1 rounded-lg font-bold flex items-center gap-1 cursor-pointer transition-all active:scale-95"
+                                className="text-[10px] bg-white/20 hover:bg-white/30 text-white border border-white/30 px-2.5 py-1 rounded-lg font-bold flex items-center gap-1 cursor-pointer transition-all active:scale-95"
                                 title="بروزرسانی لیست پیام‌ها"
                               >
-                                <RotateCcw className="w-3 h-3 text-sky-600" />
+                                <RotateCcw className="w-3 h-3 text-white" />
                                 <span>بروزرسانی</span>
                               </button>
                             </div>
 
                             <div className="relative">
-                              <Search className="absolute right-3 top-3 w-3.5 h-3.5 text-slate-400" />
+                              <Search className="absolute right-3 top-3 w-3.5 h-3.5 text-[#8696a0]" />
                               <input
                                 type="text"
                                 placeholder="جستجوی نام یا کدملی..."
                                 value={chatSearchQuery}
                                 onChange={(e) => setChatSearchQuery(e.target.value)}
-                                className="w-full text-[11px] bg-white border border-slate-300 text-slate-800 placeholder:text-slate-400 rounded-xl pr-9 pl-3 py-2 outline-none focus:border-sky-500 focus:ring-1 focus:ring-sky-500/20 font-bold"
+                                className="w-full text-[11px] bg-white border border-[#d1c7b7] text-[#111b21] placeholder:text-[#8696a0] rounded-xl pr-9 pl-3 py-2 outline-none focus:ring-2 focus:ring-[#00a884]/30 font-bold"
                               />
                             </div>
 
                             {/* Filter Tabs */}
-                            <div className="flex gap-1 bg-slate-200/70 p-1 rounded-xl border border-slate-300">
+                            <div className="flex gap-1 bg-[#004d40] p-1 rounded-xl border border-[#003d33]">
                               <button
                                 onClick={() => setChatFilter('all')}
-                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'all' ? 'bg-sky-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'all' ? 'bg-[#00a884] text-white shadow-sm' : 'text-emerald-100 hover:text-white'}`}
                               >
                                 همه ({patientConversations.length})
                               </button>
                               <button
                                 onClick={() => setChatFilter('unanswered')}
-                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'unanswered' ? 'bg-rose-600 text-white shadow-sm' : 'text-slate-600 hover:text-rose-600'}`}
+                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'unanswered' ? 'bg-rose-600 text-white shadow-sm' : 'text-emerald-100 hover:text-white'}`}
                               >
                                 بدون پاسخ ({patientConversations.filter((c: any) => c.unansweredCount > 0).length})
                               </button>
                               <button
                                 onClick={() => setChatFilter('answered')}
-                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'answered' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600 hover:text-emerald-700'}`}
+                                className={`flex-1 text-[10px] py-1.5 rounded-lg font-black transition-all ${chatFilter === 'answered' ? 'bg-[#00a884] text-white shadow-sm' : 'text-emerald-100 hover:text-white'}`}
                               >
                                 پاسخ‌شده ({patientConversations.filter((c: any) => c.unansweredCount === 0).length})
                               </button>
@@ -8065,7 +8065,7 @@ export default function App() {
                           </div>
 
                           {/* List of Threads */}
-                          <div className="flex-1 overflow-y-auto divide-y divide-slate-200">
+                          <div className="flex-1 overflow-y-auto divide-y divide-[#d1c7b7]">
                             {filteredConvos.map((convo: any) => {
                               const isSelected = convo.patientId === activeChatPatientId;
                               const lastMsg = convo.messages[convo.messages.length - 1];
@@ -8078,31 +8078,31 @@ export default function App() {
                                     setActiveChatPatientId(convo.patientId);
                                     setEditingMsgId(null);
                                   }}
-                                  className={`w-full text-right p-4 transition-all flex flex-col gap-1.5 relative hover:bg-slate-100 ${isSelected ? 'bg-sky-50 border-r-4 border-sky-600' : ''}`}
+                                  className={`w-full text-right p-4 transition-all flex flex-col gap-1.5 relative hover:bg-[#e9edef] ${isSelected ? 'bg-[#d9fdd3] border-r-4 border-[#00a884]' : 'bg-transparent'}`}
                                 >
                                   <div className="flex justify-between items-center w-full">
-                                    <span className="font-black text-xs text-slate-900 block">{convo.patientName}</span>
-                                    <span className="text-[9px] text-slate-500 font-mono font-bold">
+                                    <span className="font-black text-xs text-[#111b21] block">{convo.patientName}</span>
+                                    <span className="text-[9px] text-[#54656f] font-mono font-bold">
                                       {new Date(convo.lastAskedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}
                                     </span>
                                   </div>
 
-                                  <div className="text-[10px] text-slate-600 line-clamp-1 flex justify-between items-center w-full gap-2">
+                                  <div className="text-[10px] text-[#54656f] line-clamp-1 flex justify-between items-center w-full gap-2">
                                     <span className="truncate">{lastMsg?.answer || lastMsg?.question}</span>
                                     {convo.unansweredCount > 0 ? (
                                       <span className="bg-rose-600 text-white font-black text-[9px] px-2 py-0.5 rounded-full shrink-0 animate-pulse">
                                         {convo.unansweredCount} جدید
                                       </span>
                                     ) : (
-                                      <CheckCircle className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                      <CheckCircle className="w-3.5 h-3.5 text-[#008069] shrink-0" />
                                     )}
                                   </div>
 
                                   <div className="flex items-center gap-1.5 mt-0.5">
-                                    <span className="text-[9px] bg-slate-200 text-slate-700 px-2 py-0.5 rounded font-black">
+                                    <span className="text-[9px] bg-white text-[#111b21] border border-[#d1c7b7] px-2 py-0.5 rounded font-black">
                                       بخش {dept?.name || 'نامشخص'}
                                     </span>
-                                    <span className="text-[9px] font-mono text-slate-500">
+                                    <span className="text-[9px] font-mono text-[#54656f]">
                                       کدملی: {convo.patientId.substring(0, 3) + '***' + convo.patientId.substring(7)}
                                     </span>
                                   </div>
@@ -8111,75 +8111,75 @@ export default function App() {
                             })}
 
                             {filteredConvos.length === 0 && (
-                              <div className="text-center py-16 px-4 text-slate-500 text-xs font-bold space-y-1">
+                              <div className="text-center py-16 px-4 text-[#54656f] text-xs font-bold space-y-1">
                                 <p>موردی یافت نشد.</p>
-                                <p className="text-[10px] text-slate-500 font-medium">گفتگوی فعالی با شرایط فیلتر شما وجود ندارد.</p>
+                                <p className="text-[10px] text-[#667781] font-medium">گفتگوی فعالی با شرایط فیلتر شما وجود ندارد.</p>
                               </div>
                             )}
                           </div>
                         </div>
 
                         {/* Left / Active Chat Conversation Window */}
-                        <div className={`flex-1 flex flex-col bg-slate-50/70 ${!activeChatPatientId ? 'hidden md:flex items-center justify-center' : 'flex'}`}>
+                        <div className={`flex-1 flex flex-col bg-[#efeae2] ${!activeChatPatientId ? 'hidden md:flex items-center justify-center' : 'flex'}`}>
                           {activeChatPatientId && activeConvo ? (
                             <>
-                              {/* Active Chat Header */}
-                              <div className="px-5 py-4 border-b border-slate-200 bg-white flex justify-between items-center">
+                              {/* Active Chat Header - WhatsApp Teal */}
+                              <div className="px-5 py-4 border-b border-[#004d40] bg-[#075e54] text-white flex justify-between items-center shadow-sm">
                                 <div className="flex items-center gap-3">
                                   <button
                                     onClick={() => setActiveChatPatientId(null)}
-                                    className="md:hidden text-slate-600 hover:text-slate-900 bg-slate-100 border border-slate-200 p-2 rounded-xl"
+                                    className="md:hidden text-white bg-white/10 hover:bg-white/20 border border-white/20 p-2 rounded-xl"
                                   >
                                     <ArrowRight className="w-4 h-4" />
                                   </button>
                                   <div>
                                     <div className="flex items-center gap-2">
-                                      <h4 className="font-black text-slate-900 text-sm">{activeConvo.patientName}</h4>
-                                      <span className="text-[10px] font-mono bg-sky-50 text-sky-800 border border-sky-200 px-2.5 py-0.5 rounded-full font-black">
+                                      <h4 className="font-black text-white text-sm">{activeConvo.patientName}</h4>
+                                      <span className="text-[10px] font-mono bg-white/20 text-white border border-white/30 px-2.5 py-0.5 rounded-full font-black">
                                         پرونده {activePatientInfo?.fileNumber || 'نامشخص'}
                                       </span>
                                     </div>
-                                    <div className="text-[10px] text-slate-500 flex items-center gap-2.5 mt-1 font-bold">
+                                    <div className="text-[10px] text-emerald-100 flex items-center gap-2.5 mt-1 font-bold">
                                       <span>سن: {activePatientInfo?.age} سال</span>
-                                      <span className="text-slate-300">|</span>
-                                      <span>بیماری: <span className="text-sky-700">{activePatientDisease?.name || 'نامشخص'}</span></span>
+                                      <span className="text-emerald-300">|</span>
+                                      <span>بیماری: <span className="text-white font-black">{activePatientDisease?.name || 'نامشخص'}</span></span>
                                     </div>
                                   </div>
                                 </div>
 
-                                <div className="hidden sm:flex items-center gap-2 text-xs">
-                                  <span className="text-slate-500">آخرین بروزرسانی:</span>
-                                  <span className="text-slate-700 font-mono font-black">
+                                <div className="hidden sm:flex items-center gap-2 text-xs text-emerald-100">
+                                  <span>آخرین بروزرسانی:</span>
+                                  <span className="text-white font-mono font-black">
                                     {new Date(activeConvo.lastAskedAt).toLocaleDateString('fa-IR')}
                                   </span>
                                 </div>
                               </div>
 
                               {/* Chat Scrollable Message Body */}
-                              <div className="flex-1 overflow-y-auto p-5 space-y-4">
+                              <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-[#efeae2]">
                                 {sortedChatMessages.map((msg: Message) => {
                                   const isPatientMsg = !msg.answer || msg.question !== 'پیگیری روند درمان توسط پزشک';
 
                                   return (
                                     <div key={msg.id} className="space-y-3">
-                                      {/* Patient Message (Question Bubble) */}
+                                      {/* Patient Message (Question Bubble - White) */}
                                       {isPatientMsg && (
                                         <div className="flex items-start gap-2.5 max-w-[85%] md:max-w-[70%]">
-                                          <div className="bg-white border border-slate-200 p-4 rounded-2xl rounded-tr-none text-slate-800 shadow-sm space-y-2.5 w-full">
-                                            <div className="flex justify-between items-center text-[10px] text-slate-500 font-bold border-b border-slate-100 pb-1.5 mb-1">
+                                          <div className="bg-white border border-[#e1dcd5] p-4 rounded-2xl rounded-tr-none text-[#111b21] shadow-sm space-y-2.5 w-full">
+                                            <div className="flex justify-between items-center text-[10px] text-[#008069] font-black border-b border-slate-100 pb-1.5 mb-1">
                                               <span>{msg.patientName} (بیمار)</span>
-                                              <span className="font-mono">{new Date(msg.askedAt).toLocaleDateString('fa-IR')} | {new Date(msg.askedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}</span>
+                                              <span className="font-mono text-[#667781] font-bold">{new Date(msg.askedAt).toLocaleDateString('fa-IR')} | {new Date(msg.askedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}</span>
                                             </div>
-                                            <p className="text-xs font-bold leading-relaxed whitespace-pre-wrap text-justify text-slate-800">{msg.question}</p>
+                                            <p className="text-xs font-bold leading-relaxed whitespace-pre-wrap text-justify text-[#111b21]">{msg.question}</p>
 
                                             {msg.patientFileName && msg.patientFileUrl && (
-                                              <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 p-2 rounded-xl mt-2 w-full">
-                                                <Paperclip className="w-3.5 h-3.5 text-sky-600 shrink-0" />
-                                                <span className="text-[10px] text-slate-700 font-black truncate flex-1">{msg.patientFileName}</span>
+                                              <div className="flex items-center gap-2 bg-[#f0f2f5] border border-[#e1dcd5] p-2 rounded-xl mt-2 w-full">
+                                                <Paperclip className="w-3.5 h-3.5 text-[#008069] shrink-0" />
+                                                <span className="text-[10px] text-[#111b21] font-bold truncate flex-1">{msg.patientFileName}</span>
                                                 <a
                                                   href={msg.patientFileUrl}
                                                   download={msg.patientFileName}
-                                                  className="bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 text-[9px] px-2.5 py-1.5 rounded-lg font-black transition-all"
+                                                  className="bg-[#00a884] hover:bg-[#008f70] text-white text-[9px] px-2.5 py-1.5 rounded-lg font-black transition-all"
                                                 >
                                                   دانلود
                                                 </a>
@@ -8189,24 +8189,24 @@ export default function App() {
                                         </div>
                                       )}
 
-                                      {/* Doctor Answer Bubble */}
+                                      {/* Doctor Answer Bubble - Light Green */}
                                       {msg.answer ? (
                                         <div className="flex items-start gap-2.5 max-w-[85%] md:max-w-[70%] mr-auto justify-end">
-                                          <div className="bg-emerald-50/90 border border-emerald-200 p-4 rounded-2xl rounded-tl-none text-emerald-950 shadow-sm space-y-2.5 w-full">
+                                          <div className="bg-[#d9fdd3] border border-[#b2e2a8] p-4 rounded-2xl rounded-tl-none text-[#111b21] shadow-sm space-y-2.5 w-full">
 
                                             {/* Edit view inside message bubble */}
                                             {editingMsgId === msg.id ? (
                                               <div className="space-y-3">
-                                                <span className="text-[10px] text-emerald-800 font-black block">ویرایش پاسخ پزشک:</span>
+                                                <span className="text-[10px] text-[#005c4b] font-black block">ویرایش پاسخ پزشک:</span>
                                                 <textarea
                                                   rows={3}
                                                   value={editingMsgText}
                                                   onChange={(e) => setEditingMsgText(e.target.value)}
-                                                  className="w-full text-xs bg-white border border-emerald-300 rounded-xl p-2.5 text-slate-800 outline-none focus:ring-1 focus:ring-emerald-500 font-bold"
+                                                  className="w-full text-xs bg-white border border-[#b2e2a8] rounded-xl p-2.5 text-[#111b21] outline-none focus:ring-1 focus:ring-[#00a884] font-bold"
                                                 />
 
                                                 <div className="flex flex-wrap items-center gap-3">
-                                                  <label className="flex items-center gap-1.5 bg-emerald-100/70 hover:bg-emerald-100 border border-emerald-300 px-3 py-1.5 rounded-lg text-[9px] font-black text-emerald-900 cursor-pointer transition-all">
+                                                  <label className="flex items-center gap-1.5 bg-[#c2f3b8] border border-[#9fd794] px-3 py-1.5 rounded-lg text-[9px] font-black text-[#005c4b] cursor-pointer transition-all">
                                                     <Paperclip className="w-3.5 h-3.5" />
                                                     <span>ویرایش فایل ضمیمه</span>
                                                     <input
@@ -8217,7 +8217,7 @@ export default function App() {
                                                   </label>
 
                                                   {editingMsgFile ? (
-                                                    <div className="flex items-center gap-1 bg-white text-emerald-900 text-[9px] px-2 py-1 rounded-md border border-emerald-300">
+                                                    <div className="flex items-center gap-1 bg-white text-[#111b21] text-[9px] px-2 py-1 rounded-md border border-[#9fd794]">
                                                       <span className="font-bold max-w-[120px] truncate">{editingMsgFile.name}</span>
                                                       <button
                                                         onClick={() => setEditingMsgFile(null)}
@@ -8227,7 +8227,7 @@ export default function App() {
                                                       </button>
                                                     </div>
                                                   ) : msg.adminFileName ? (
-                                                    <div className="flex items-center gap-1 bg-white text-emerald-800 text-[9px] px-2 py-1 rounded-md">
+                                                    <div className="flex items-center gap-1 bg-white text-[#111b21] text-[9px] px-2 py-1 rounded-md">
                                                       <span className="max-w-[120px] truncate">{msg.adminFileName}</span>
                                                     </div>
                                                   ) : null}
@@ -8242,7 +8242,7 @@ export default function App() {
                                                   </button>
                                                   <button
                                                     onClick={() => handleSaveEditedMessage(msg.id)}
-                                                    className="px-4 py-1.5 rounded-lg text-[10px] bg-emerald-600 text-white font-black cursor-pointer shadow-md hover:bg-emerald-700 transition-all"
+                                                    className="px-4 py-1.5 rounded-lg text-[10px] bg-[#008069] text-white font-black cursor-pointer shadow-md hover:bg-[#006a57] transition-all"
                                                   >
                                                     ذخیره تغییرات
                                                   </button>
@@ -8250,7 +8250,7 @@ export default function App() {
                                               </div>
                                             ) : (
                                               <>
-                                                <div className="flex justify-between items-center text-[10px] text-emerald-800 font-bold border-b border-emerald-200 pb-1.5 mb-1">
+                                                <div className="flex justify-between items-center text-[10px] text-[#005c4b] font-black border-b border-[#9fd794]/40 pb-1.5 mb-1">
                                                   <span>{msg.answeredBy} (پاسخ دهنده)</span>
                                                   <div className="flex items-center gap-2">
                                                     <button
@@ -8259,24 +8259,24 @@ export default function App() {
                                                         setEditingMsgText(msg.answer || '');
                                                         setEditingMsgFile(msg.adminFileName && msg.adminFileUrl ? { name: msg.adminFileName, url: msg.adminFileUrl } : null);
                                                       }}
-                                                      className="text-sky-700 hover:text-sky-800 bg-white border border-sky-200 px-2 py-0.5 rounded text-[9px] cursor-pointer font-black"
+                                                      className="text-[#008069] hover:text-[#006a57] bg-white border border-[#b2e2a8] px-2 py-0.5 rounded text-[9px] cursor-pointer font-black"
                                                     >
                                                       ویرایش
                                                     </button>
-                                                    <span className="font-mono">{msg.answeredAt ? new Date(msg.answeredAt).toLocaleDateString('fa-IR') : ''}</span>
+                                                    <span className="font-mono text-[#54656f]">{msg.answeredAt ? new Date(msg.answeredAt).toLocaleDateString('fa-IR') : ''}</span>
                                                   </div>
                                                 </div>
 
-                                                <p className="text-xs font-bold leading-relaxed whitespace-pre-wrap text-justify text-slate-900">{msg.answer}</p>
+                                                <p className="text-xs font-bold leading-relaxed whitespace-pre-wrap text-justify text-[#111b21]">{msg.answer}</p>
 
                                                 {msg.adminFileName && msg.adminFileUrl && (
-                                                  <div className="flex items-center gap-2 bg-white border border-emerald-200 p-2 rounded-xl mt-2 w-full">
-                                                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                                                    <span className="text-[10px] text-emerald-900 font-black truncate flex-1">{msg.adminFileName}</span>
+                                                  <div className="flex items-center gap-2 bg-[#c2f3b8] border border-[#9fd794] p-2 rounded-xl mt-2 w-full">
+                                                    <FileSpreadsheet className="w-3.5 h-3.5 text-[#005c4b] shrink-0" />
+                                                    <span className="text-[10px] text-[#111b21] font-bold truncate flex-1">{msg.adminFileName}</span>
                                                     <a
                                                       href={msg.adminFileUrl}
                                                       download={msg.adminFileName}
-                                                      className="bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 text-emerald-800 text-[9px] px-2.5 py-1.5 rounded-lg font-black transition-all"
+                                                      className="bg-[#008069] hover:bg-[#006a57] text-white text-[9px] px-2.5 py-1.5 rounded-lg font-black transition-all"
                                                     >
                                                       دانلود پیوست
                                                     </a>
@@ -8294,18 +8294,18 @@ export default function App() {
                               </div>
 
                               {/* Active Chat Input Composer */}
-                              <div className="p-4 border-t border-slate-200 bg-white space-y-3">
+                              <div className="p-4 border-t border-[#d1c7b7] bg-[#f0f2f5] space-y-3">
 
                                 {/* Replying state alert indicator */}
                                 {(() => {
                                   const unanswered = sortedChatMessages.find(m => !m.answer);
                                   return unanswered ? (
-                                    <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-xl px-3 py-2 text-[10px] font-black flex items-center justify-between">
+                                    <div className="bg-[#fff9e6] border border-[#f0d886] text-[#8a6d12] rounded-xl px-3 py-2 text-[10px] font-black flex items-center justify-between">
                                       <span>پاسخ به سوال بیمار: "{unanswered.question.substring(0, 50)}..."</span>
-                                      <span className="text-amber-800">بخش: {departments.find(d => d.id === unanswered.departmentId)?.name}</span>
+                                      <span className="text-[#68520b]">بخش: {departments.find(d => d.id === unanswered.departmentId)?.name}</span>
                                     </div>
                                   ) : (
-                                    <div className="bg-sky-50 border border-sky-200 text-sky-900 rounded-xl px-3 py-2 text-[10px] font-black">
+                                    <div className="bg-[#d9fdd3] border border-[#b2e2a8] text-[#005c4b] rounded-xl px-3 py-2 text-[10px] font-black">
                                       بیمار سوال بدون پاسخی ندارد. در صورت تمایل می‌توانید یادداشت جدیدی جهت پیگیری روند درمان ارسال کنید.
                                     </div>
                                   );
@@ -8313,8 +8313,8 @@ export default function App() {
 
                                 {/* Attached composer file preview */}
                                 {chatInputFile && (
-                                  <div className="flex items-center gap-2 bg-emerald-50 text-emerald-800 text-[10px] px-3.5 py-2 rounded-xl border border-emerald-200 w-fit">
-                                    <FileSpreadsheet className="w-4 h-4 shrink-0 text-emerald-600" />
+                                  <div className="flex items-center gap-2 bg-[#d9fdd3] text-[#005c4b] text-[10px] px-3.5 py-2 rounded-xl border border-[#b2e2a8] w-fit">
+                                    <FileSpreadsheet className="w-4 h-4 shrink-0 text-[#008069]" />
                                     <span className="font-bold max-w-[200px] truncate">{chatInputFile.name}</span>
                                     <button
                                       type="button"
@@ -8328,13 +8328,13 @@ export default function App() {
 
                                 {/* Main Text Input Bar */}
                                 <div className="flex gap-3 items-end">
-                                  <div className="flex-1 bg-slate-50 border border-slate-300 rounded-2xl p-2 focus-within:border-sky-500 focus-within:bg-white transition-all flex flex-col gap-1">
+                                  <div className="flex-1 bg-white border border-[#d1c7b7] rounded-2xl p-2 focus-within:border-[#00a884] transition-all flex flex-col gap-1">
                                     <textarea
                                       rows={2}
                                       value={chatInputText}
                                       onChange={(e) => setChatInputText(e.target.value)}
                                       placeholder="پیام یا دستورالعمل مراقبتی خود را بنویسید..."
-                                      className="w-full text-xs bg-transparent border-none text-slate-800 placeholder:text-slate-400 resize-none outline-none font-bold p-1 leading-relaxed"
+                                      className="w-full text-xs bg-transparent border-none text-[#111b21] placeholder:text-[#8696a0] resize-none outline-none font-bold p-1 leading-relaxed"
                                       onKeyDown={(e) => {
                                         if (e.key === 'Enter' && !e.shiftKey) {
                                           e.preventDefault();
@@ -8343,10 +8343,10 @@ export default function App() {
                                       }}
                                     />
 
-                                    <div className="flex justify-between items-center pt-1 border-t border-slate-200">
+                                    <div className="flex justify-between items-center pt-1 border-t border-slate-100">
                                       {/* File Attachment Trigger Button */}
-                                      <label className="flex items-center gap-1.5 hover:bg-slate-200 px-2.5 py-1.5 rounded-lg text-[10px] font-black text-slate-600 hover:text-slate-900 cursor-pointer transition-all">
-                                        <Paperclip className="w-3.5 h-3.5 text-slate-500" />
+                                      <label className="flex items-center gap-1.5 hover:bg-[#f0f2f5] px-2.5 py-1.5 rounded-lg text-[10px] font-black text-[#54656f] hover:text-[#111b21] cursor-pointer transition-all">
+                                        <Paperclip className="w-3.5 h-3.5 text-[#008069]" />
                                         <span>افزودن فایل / دستورالعمل</span>
                                         <input
                                           type="file"
@@ -8355,7 +8355,7 @@ export default function App() {
                                         />
                                       </label>
 
-                                      <span className="text-[9px] text-slate-400 font-mono">Shift+Enter برای خط جدید</span>
+                                      <span className="text-[9px] text-[#8696a0] font-mono">Shift+Enter برای خط جدید</span>
                                     </div>
                                   </div>
 
