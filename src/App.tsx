@@ -723,9 +723,36 @@ export default function App() {
   // --- Router & App Navigation ---
   // Screens: 'welcome' | 'hub' | 'db_departments' | 'patient_login' | 'patient_dashboard' | 'admin_dashboard'
   const [currentScreen, setCurrentScreen] = useState<string>(() => {
-    return localStorage.getItem('hospital_session_screen') || 'welcome';
+    const savedScreen = localStorage.getItem('hospital_session_screen');
+    const savedPatient = localStorage.getItem('hospital_session_patient');
+    const savedAdmin = localStorage.getItem('hospital_session_admin');
+
+    if (savedScreen && savedScreen !== 'welcome') {
+      if (savedScreen === 'patient_dashboard' && !savedPatient) return 'hub';
+      if (savedScreen === 'admin_dashboard' && !savedAdmin) return 'hub';
+      return savedScreen;
+    }
+    if (savedPatient) return 'patient_dashboard';
+    if (savedAdmin) return 'admin_dashboard';
+
+    return 'welcome';
   });
   const [welcomeColor, setWelcomeColor] = useState<'red' | 'green' | 'blue' | 'purple' | 'pink'>('red');
+
+  // --- Patient & Admin Tab States ---
+  const [patientTab, setPatientTab] = useState<'grid' | 'education' | 'qa' | 'satisfaction'>(() => {
+    return (localStorage.getItem('hospital_session_patient_tab') as any) || 'grid';
+  });
+  useEffect(() => {
+    if (patientTab) safeLocalStorageSet('hospital_session_patient_tab', patientTab);
+  }, [patientTab]);
+
+  const [adminTab, setAdminTab] = useState<'overview' | 'register' | 'patients' | 'qa' | 'disease_edit' | 'admins_manage' | 'stats' | 'checklists' | 'complaints' | 'banners'>(() => {
+    return (localStorage.getItem('hospital_session_admin_tab') as any) || 'overview';
+  });
+  useEffect(() => {
+    if (adminTab) safeLocalStorageSet('hospital_session_admin_tab', adminTab);
+  }, [adminTab]);
 
   // Automatically cycle through the heart colors smoothly like a living heart when on welcome screen
   useEffect(() => {
@@ -847,7 +874,118 @@ export default function App() {
   const [readerFontSize, setReaderFontSize] = useState<'normal' | 'large' | 'xlarge'>('large');
 
   // --- Feedback Hub States ---
-  const [feedbackView, setFeedbackView] = useState<'grid' | 'complaint_form' | 'dept_satisfaction_select'>('grid');
+  const [feedbackView, setFeedbackView] = useState<'grid' | 'complaint_form' | 'dept_satisfaction_select'>(() => {
+    return (localStorage.getItem('hospital_session_feedback_view') as any) || 'grid';
+  });
+
+  useEffect(() => {
+    if (feedbackView) safeLocalStorageSet('hospital_session_feedback_view', feedbackView);
+  }, [feedbackView]);
+
+  // --- Mobile & Browser Hardware Back Button (History State Management) ---
+  const isPopStateRef = useRef(false);
+  const lastNavStateStrRef = useRef<string>('');
+  const patientChatContainerRef = useRef<HTMLDivElement>(null);
+  const adminChatContainerRef = useRef<HTMLDivElement>(null);
+  const patientMessagesEndRef = useRef<HTMLDivElement>(null);
+  const adminMessagesEndRef = useRef<HTMLDivElement>(null);
+  const patientChatWrapperRef = useRef<HTMLDivElement>(null);
+  const adminChatWrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (patientTab === 'qa' && patientChatContainerRef.current) {
+      const scrollToBottom = () => {
+        if (patientChatContainerRef.current) {
+          patientChatContainerRef.current.scrollTop = patientChatContainerRef.current.scrollHeight;
+        }
+      };
+      scrollToBottom();
+      const t1 = setTimeout(scrollToBottom, 60);
+      const t2 = setTimeout(scrollToBottom, 250);
+      return () => { clearTimeout(t1); clearTimeout(t2); };
+    }
+  }, [patientTab, currentScreen, messages]);
+
+  useEffect(() => {
+    if (adminTab === 'qa' && activeChatPatientId && adminChatContainerRef.current) {
+      const scrollToBottom = () => {
+        if (adminChatContainerRef.current) {
+          adminChatContainerRef.current.scrollTop = adminChatContainerRef.current.scrollHeight;
+        }
+      };
+      scrollToBottom();
+      const t1 = setTimeout(scrollToBottom, 60);
+      const t2 = setTimeout(scrollToBottom, 250);
+      return () => { clearTimeout(t1); clearTimeout(t2); };
+    }
+  }, [adminTab, currentScreen, activeChatPatientId, messages]);
+
+  useEffect(() => {
+    const currentState = {
+      currentScreen,
+      patientTab,
+      adminTab,
+      selectedDeptId: selectedDept?.id || null,
+      selectedDiseaseId: selectedDisease?.id || null,
+      activeChatPatientId,
+      feedbackView,
+      viewingDiseaseId
+    };
+
+    const stateStr = JSON.stringify(currentState);
+
+    if (isPopStateRef.current) {
+      isPopStateRef.current = false;
+      lastNavStateStrRef.current = stateStr;
+      return;
+    }
+
+    if (stateStr !== lastNavStateStrRef.current) {
+      if (!lastNavStateStrRef.current) {
+        window.history.replaceState(currentState, '');
+      } else {
+        window.history.pushState(currentState, '');
+      }
+      lastNavStateStrRef.current = stateStr;
+    }
+  }, [currentScreen, patientTab, adminTab, selectedDept, selectedDisease, activeChatPatientId, feedbackView, viewingDiseaseId]);
+
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      const navState = event.state;
+      isPopStateRef.current = true;
+
+      if (navState) {
+        if (navState.currentScreen !== undefined) setCurrentScreen(navState.currentScreen);
+        if (navState.patientTab !== undefined) setPatientTab(navState.patientTab);
+        if (navState.adminTab !== undefined) setAdminTab(navState.adminTab);
+        if (navState.activeChatPatientId !== undefined) setActiveChatPatientId(navState.activeChatPatientId);
+        if (navState.feedbackView !== undefined) setFeedbackView(navState.feedbackView);
+        if (navState.viewingDiseaseId !== undefined) setViewingDiseaseId(navState.viewingDiseaseId);
+
+        if (navState.selectedDeptId) {
+          const foundDept = departments.find(d => d.id === navState.selectedDeptId);
+          setSelectedDept(foundDept || null);
+        } else {
+          setSelectedDept(null);
+        }
+
+        if (navState.selectedDiseaseId) {
+          const foundDisease = diseases.find(d => d.id === navState.selectedDiseaseId);
+          setSelectedDisease(foundDisease || null);
+        } else {
+          setSelectedDisease(null);
+        }
+      } else {
+        if (currentScreen !== 'welcome') {
+          setCurrentScreen('hub');
+        }
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [departments, diseases, currentScreen]);
   const [complaintName, setComplaintName] = useState('');
   const [complaintPhone, setComplaintPhone] = useState('');
   const [complaintAge, setComplaintAge] = useState('');
@@ -1182,7 +1320,6 @@ export default function App() {
   };
 
   // --- Admin Logic ---
-  const [adminTab, setAdminTab] = useState<'overview' | 'register' | 'patients' | 'qa' | 'disease_edit' | 'admins_manage' | 'stats' | 'checklists' | 'complaints' | 'banners'>('overview');
   const [complaintsSubTab, setComplaintsSubTab] = useState<'general' | 'hospital_survey' | 'dept_survey'>('general');
   const [selectedSurveyTile, setSelectedSurveyTile] = useState<'overall' | 'questions' | 'praise' | 'suggestions' | null>(null);
   const [selectedDeptFilterId, setSelectedDeptFilterId] = useState<string | null>(null);
@@ -1908,6 +2045,46 @@ export default function App() {
     }, 3000);
   };
 
+  // Responder Role Title Helpers
+  const getAdminRoleTitle = (admin?: AdminUser | null, deptId?: string) => {
+    if (!admin) {
+      const dept = departments.find(d => d.id === deptId);
+      return dept ? `مسئول ${dept.name.startsWith('بخش') ? dept.name : 'بخش ' + dept.name}` : 'مسئول بخش درمان';
+    }
+    if (admin.role === 'super') {
+      const dept = departments.find(d => d.id === deptId);
+      return dept ? `مدیریت کل (مسئول ${dept.name.startsWith('بخش') ? dept.name : 'بخش ' + dept.name})` : 'مدیریت کل بیمارستان';
+    }
+    const effectiveDeptId = admin.departmentId || deptId;
+    const dept = departments.find(d => d.id === effectiveDeptId);
+    if (dept) {
+      const deptName = dept.name.startsWith('بخش') ? dept.name : `بخش ${dept.name}`;
+      return `مسئول ${deptName}`;
+    }
+    return 'مسئول بخش درمان';
+  };
+
+  const formatResponderTitle = (msgAnsweredBy?: string, deptId?: string) => {
+    if (!msgAnsweredBy) {
+      const dept = departments.find(d => d.id === deptId);
+      if (dept) {
+        const deptName = dept.name.startsWith('بخش') ? dept.name : `بخش ${dept.name}`;
+        return `مسئول ${deptName}`;
+      }
+      return 'مسئول بخش درمان';
+    }
+    if (msgAnsweredBy.startsWith('مسئول') || msgAnsweredBy.startsWith('مدیریت') || msgAnsweredBy.startsWith('کادر')) {
+      return msgAnsweredBy;
+    }
+    // Convert personal names/usernames to position/role title
+    const dept = departments.find(d => d.id === deptId);
+    if (dept) {
+      const deptName = dept.name.startsWith('بخش') ? dept.name : `بخش ${dept.name}`;
+      return `مسئول ${deptName}`;
+    }
+    return 'مسئول بخش درمان';
+  };
+
   // Answer Questions State
   const [replyTextMap, setReplyTextMap] = useState<{[key: string]: string}>({});
   const handleAnswerQuestion = (messageId: string) => {
@@ -1922,7 +2099,7 @@ export default function App() {
           ...m,
           answer: text,
           answeredAt: new Date().toISOString(),
-          answeredBy: currentAdmin?.name || 'کادر مدیریت بیمارستان',
+          answeredBy: getAdminRoleTitle(currentAdmin, m.departmentId),
           adminFileName: attachedFile?.name || undefined,
           adminFileUrl: attachedFile?.url || undefined
         };
@@ -1943,7 +2120,6 @@ export default function App() {
   };
 
   // --- Patient Logic ---
-  const [patientTab, setPatientTab] = useState<'grid' | 'education' | 'qa' | 'satisfaction'>('grid');
 
   // Patient symptoms checkboxes (Dynamic per disease checklists)
   const [patientAnswers, setPatientAnswers] = useState<{[key: string]: boolean}>({});
@@ -2261,7 +2437,7 @@ export default function App() {
             ...m,
             answer: chatInputText,
             answeredAt: new Date().toISOString(),
-            answeredBy: currentAdmin?.name || 'کادر درمان',
+            answeredBy: getAdminRoleTitle(currentAdmin, m.departmentId),
             adminFileName: chatInputFile?.name || undefined,
             adminFileUrl: chatInputFile?.url || undefined
           };
@@ -2284,7 +2460,7 @@ export default function App() {
         askedAt: new Date().toISOString(),
         answer: chatInputText,
         answeredAt: new Date().toISOString(),
-        answeredBy: currentAdmin?.name || 'کادر درمان',
+        answeredBy: getAdminRoleTitle(currentAdmin, deptId),
         adminFileName: chatInputFile?.name || undefined,
         adminFileUrl: chatInputFile?.url || undefined
       };
@@ -4394,7 +4570,7 @@ export default function App() {
               initial={{ opacity: 0, y: 15 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0 }}
-              className="max-w-7xl mx-auto px-4 py-8 animate-fade-in"
+              className="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-8 animate-fade-in w-full min-w-0 overflow-x-hidden"
             >
               {/* MAIN DASHBOARD CONTAINER: ONLY SHOW PROFILE & TRIAGE CARDS WHEN ON MAIN GRID TAB */}
               {patientTab === 'grid' && (
@@ -4630,7 +4806,7 @@ export default function App() {
 
               {/* ACTIVE TAB CONTENT */}
               {patientTab !== 'grid' && (
-                <div className="bg-white border border-slate-200 shadow-xl rounded-[2.5rem] p-6 md:p-8 relative text-right">
+                <div className="bg-white border border-slate-200 shadow-xl rounded-[1.5rem] sm:rounded-[2.5rem] p-3 sm:p-6 md:p-8 relative text-right w-full max-w-full min-w-0">
 
                   {/* A. Education material tab */}
                   {patientTab === 'education' && (
@@ -4747,31 +4923,31 @@ export default function App() {
 
                   {/* C. Chat and Q&A page */}
                   {patientTab === 'qa' && (
-                    <div className="space-y-4">
+                    <div className="space-y-3 sm:space-y-4 w-full max-w-full overflow-hidden">
                       <button
                         onClick={() => setPatientTab('grid')}
-                        className="inline-flex items-center gap-2 text-xs font-black text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-4 py-2.5 rounded-xl transition-all duration-300 cursor-pointer mb-2"
+                        className="inline-flex items-center gap-2 text-xs font-black text-indigo-600 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-3.5 py-2 rounded-xl transition-all duration-300 cursor-pointer mb-1"
                       >
                         <ArrowRight className="w-4 h-4" />
                         <span>بازگشت به پنل کاربری</span>
                       </button>
 
-                      <div className="flex flex-col h-[600px] bg-[#efeae2] rounded-[2rem] border border-[#d1c7b7] overflow-hidden relative shadow-md">
+                      <div ref={patientChatWrapperRef} className="flex flex-col h-[380px] xs:h-[430px] sm:h-[620px] max-h-[calc(100dvh-220px)] sm:max-h-[750px] w-full max-w-full bg-[#efeae2] rounded-2xl sm:rounded-[2rem] border border-[#d1c7b7] overflow-hidden relative shadow-md min-w-0">
                     {/* Chat Header - WhatsApp Teal Bar */}
-                    <div className="bg-[#075e54] p-4 text-white border-b border-[#004d40] flex items-center justify-between shadow-sm">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-full bg-white/20 border border-white/30 flex items-center justify-center shrink-0">
-                          <MessageSquare className="w-5 h-5 text-white" />
+                    <div className="bg-[#075e54] p-2.5 sm:p-4 text-white border-b border-[#004d40] flex items-center justify-between gap-2 shadow-sm shrink-0 w-full min-w-0">
+                      <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
+                        <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-white/20 border border-white/30 flex items-center justify-center shrink-0">
+                          <MessageSquare className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
                         </div>
-                        <div>
-                          <h4 className="text-sm font-black text-white">گفتگو با کادر درمان بیمارستان</h4>
-                          <span className="text-[10px] text-emerald-200 flex items-center gap-1 font-bold mt-0.5">
-                            <span className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse shrink-0" />
-                            <span>همگام‌سازی آنلاین فعال است (ارسال و دریافت زنده)</span>
+                        <div className="min-w-0 flex-1">
+                          <h4 className="text-xs sm:text-sm font-black text-white truncate">گفتگو با کادر درمان</h4>
+                          <span className="text-[9px] sm:text-[10px] text-emerald-200 flex items-center gap-1 font-bold mt-0.5 truncate">
+                            <span className="w-1.5 h-1.5 sm:w-2 sm:h-2 bg-emerald-400 rounded-full animate-pulse shrink-0" />
+                            <span className="truncate">همگام‌سازی آنلاین</span>
                           </span>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1 sm:gap-2 shrink-0">
                         <button
                           type="button"
                           onClick={async () => {
@@ -4784,57 +4960,91 @@ export default function App() {
                               });
                             }
                           }}
-                          className="text-[11px] bg-white/15 hover:bg-white/25 border border-white/25 text-white px-3 py-1.5 rounded-xl font-bold flex items-center gap-1 cursor-pointer shadow-sm transition-all active:scale-95"
+                          className="text-[9px] sm:text-[11px] bg-white/15 hover:bg-white/25 border border-white/25 text-white px-2 sm:px-3 py-1.5 rounded-xl font-bold flex items-center gap-1 cursor-pointer shadow-sm transition-all active:scale-95 shrink-0"
                           title="بروزرسانی پیام‌ها"
                         >
-                          <RotateCcw className="w-3.5 h-3.5 text-white" />
-                          <span>بروزرسانی</span>
+                          <RotateCcw className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-white" />
+                          <span className="hidden xs:inline">بروزرسانی</span>
                         </button>
-                        <span className="text-[11px] bg-white/15 border border-white/25 text-white px-3 py-1.5 rounded-xl font-mono font-black">
-                          تعداد پیام‌ها: {messages.filter(m => m.patientId === currentUser.nationalId).length}
+                        <span className="text-[9px] sm:text-[11px] bg-white/15 border border-white/25 text-white px-2 sm:px-3 py-1.5 rounded-xl font-mono font-black shrink-0 whitespace-nowrap">
+                          {messages.filter(m => m.patientId === currentUser.nationalId).length} پیام
                         </span>
                       </div>
                     </div>
 
                     {/* Chat Messages Stream (WhatsApp Timeline Style) */}
-                    <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 flex flex-col-reverse bg-[#efeae2] border-y border-[#d1c7b7]">
-                      {/* Sort messages from newest to oldest since flex-col-reverse will render them correctly from bottom to top */}
+                    <div ref={patientChatContainerRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-2.5 sm:p-6 space-y-3 sm:space-y-4 flex flex-col bg-[#efeae2] border-y border-[#d1c7b7] w-full min-w-0 scroll-smooth">
+                      {/* Sort messages chronologically (oldest at top, newest at bottom) */}
                       {[...messages]
                         .filter(m => m.patientId === currentUser.nationalId)
-                        .sort((a, b) => new Date(b.askedAt).getTime() - new Date(a.askedAt).getTime())
+                        .sort((a, b) => new Date(a.askedAt).getTime() - new Date(b.askedAt).getTime())
                         .map((msg) => (
-                          <React.Fragment key={msg.id}>
-                            {/* 2. Doctor Response (Rendered above in flex-col-reverse timeline if answered - White Bubble) */}
+                          <div key={msg.id} className="space-y-2.5 w-full min-w-0">
+                            {/* 1. Patient Message (On Right - Light Green Bubble) */}
+                            <div className="flex justify-end my-1 w-full min-w-0">
+                              <div className="max-w-[92%] sm:max-w-[80%] space-y-1 min-w-0">
+                                <div className="bg-[#d9fdd3] text-[#111b21] rounded-2xl rounded-tr-none p-3 sm:p-4 shadow-sm border border-[#b2e2a8] break-words overflow-hidden min-w-0">
+                                  <div className="flex flex-wrap justify-between items-center text-[10px] sm:text-[11px] text-[#005c4b] mb-1.5 font-black pb-1 border-b border-[#9fd794]/40 gap-1 min-w-0">
+                                    <span className="truncate max-w-[75%]">پیام شما ({currentUser.name})</span>
+                                    <span className="font-mono text-[9px] text-[#54656f] font-bold shrink-0">
+                                      {new Date(msg.askedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}
+                                    </span>
+                                  </div>
+                                  <p className="text-xs sm:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-[#111b21] text-justify break-words [overflow-wrap:anywhere]">
+                                    {msg.question}
+                                  </p>
+
+                                  {/* Attached file (Patient) */}
+                                  {msg.patientFileName && msg.patientFileUrl && (
+                                    <div className="mt-2.5 flex items-center justify-between gap-2 bg-[#c2f3b8] p-2 rounded-xl border border-[#9fd794] min-w-0 w-full">
+                                      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                        <Paperclip className="w-3.5 h-3.5 text-[#005c4b] shrink-0" />
+                                        <span className="text-[10px] text-[#111b21] font-bold truncate">{msg.patientFileName}</span>
+                                      </div>
+                                      <a
+                                        href={msg.patientFileUrl}
+                                        download={msg.patientFileName}
+                                        className="bg-[#008069] hover:bg-[#006a57] text-white text-[9px] px-2.5 py-1 rounded-lg font-black cursor-pointer transition-colors shrink-0 whitespace-nowrap"
+                                      >
+                                        دانلود
+                                      </a>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* 2. Doctor Response (On Left - White Bubble) */}
                             {msg.answer && (
-                              <div className="flex justify-start my-1">
-                                <div className="max-w-[85%] md:max-w-[70%] space-y-1">
-                                  <div className="bg-white text-[#111b21] rounded-2xl rounded-tl-none p-4 shadow-sm border border-[#e1dcd5]">
-                                    <div className="flex justify-between items-center text-[11px] text-[#008069] font-black mb-1.5 pb-1 border-b border-slate-100">
-                                      <span className="flex items-center gap-1.5">
-                                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                                        <span>پاسخ {msg.answeredBy || 'کادر درمان بخش'}</span>
+                              <div className="flex justify-start my-1 w-full min-w-0">
+                                <div className="max-w-[92%] sm:max-w-[80%] space-y-1 min-w-0">
+                                  <div className="bg-white text-[#111b21] rounded-2xl rounded-tl-none p-3 sm:p-4 shadow-sm border border-[#e1dcd5] break-words overflow-hidden min-w-0">
+                                    <div className="flex flex-wrap justify-between items-center text-[10px] sm:text-[11px] text-[#008069] font-black mb-1.5 pb-1 border-b border-slate-100 gap-1.5 min-w-0 w-full">
+                                      <span className="flex items-center gap-1.5 flex-1 min-w-0 leading-snug">
+                                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                                        <span className="font-bold whitespace-normal break-words">پاسخ {formatResponderTitle(msg.answeredBy, msg.departmentId)}</span>
                                       </span>
-                                      <span className="font-mono text-[9px] text-[#667781] font-bold">
+                                      <span className="font-mono text-[9px] text-[#667781] font-bold shrink-0">
                                         {msg.answeredAt ? new Date(msg.answeredAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' }) : ''}
                                       </span>
                                     </div>
-                                    <p className="text-xs md:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-[#111b21] text-justify">
+                                    <p className="text-xs sm:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-[#111b21] text-justify break-words [overflow-wrap:anywhere]">
                                       {msg.answer}
                                     </p>
 
                                     {/* Attached file (Admin) */}
                                     {msg.adminFileName && msg.adminFileUrl && (
-                                      <div className="mt-2.5 flex items-center justify-between gap-3 bg-[#f0f2f5] p-2 rounded-xl border border-[#e1dcd5]">
-                                        <div className="flex items-center gap-1.5 min-w-0">
+                                      <div className="mt-2.5 flex items-center justify-between gap-2 bg-[#f0f2f5] p-2 rounded-xl border border-[#e1dcd5] min-w-0 w-full">
+                                        <div className="flex items-center gap-1.5 min-w-0 flex-1">
                                           <Paperclip className="w-3.5 h-3.5 text-[#008069] shrink-0" />
-                                          <span className="text-[10px] text-[#111b21] font-bold truncate max-w-[130px]">{msg.adminFileName}</span>
+                                          <span className="text-[10px] text-[#111b21] font-bold truncate">{msg.adminFileName}</span>
                                         </div>
                                         <a
                                           href={msg.adminFileUrl}
                                           download={msg.adminFileName}
-                                          className="bg-[#00a884] hover:bg-[#008f70] text-white text-[9px] px-2.5 py-1 rounded-lg font-black cursor-pointer transition-colors shrink-0"
+                                          className="bg-[#00a884] hover:bg-[#008f70] text-white text-[9px] px-2.5 py-1 rounded-lg font-black cursor-pointer transition-colors shrink-0 whitespace-nowrap"
                                         >
-                                          دانلود فایل
+                                          دانلود
                                         </a>
                                       </div>
                                     )}
@@ -4842,41 +5052,7 @@ export default function App() {
                                 </div>
                               </div>
                             )}
-
-                            {/* 1. Patient Message (On Right - Light Green Bubble) */}
-                            <div className="flex justify-end my-1">
-                              <div className="max-w-[85%] md:max-w-[70%] space-y-1">
-                                <div className="bg-[#d9fdd3] text-[#111b21] rounded-2xl rounded-tr-none p-4 shadow-sm border border-[#b2e2a8]">
-                                  <div className="flex justify-between items-center text-[10px] text-[#005c4b] mb-1.5 font-black pb-1 border-b border-[#9fd794]/40">
-                                    <span>پیام شما ({currentUser.name})</span>
-                                    <span className="font-mono text-[9px] text-[#54656f] font-bold">
-                                      {new Date(msg.askedAt).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })}
-                                    </span>
-                                  </div>
-                                  <p className="text-xs md:text-sm font-semibold leading-relaxed whitespace-pre-wrap text-[#111b21] text-justify">
-                                    {msg.question}
-                                  </p>
-
-                                  {/* Attached file (Patient) */}
-                                  {msg.patientFileName && msg.patientFileUrl && (
-                                    <div className="mt-2.5 flex items-center justify-between gap-3 bg-[#c2f3b8] p-2 rounded-xl border border-[#9fd794]">
-                                      <div className="flex items-center gap-1.5 min-w-0">
-                                        <Paperclip className="w-3.5 h-3.5 text-[#005c4b] shrink-0" />
-                                        <span className="text-[10px] text-[#111b21] font-bold truncate max-w-[130px]">{msg.patientFileName}</span>
-                                      </div>
-                                      <a
-                                        href={msg.patientFileUrl}
-                                        download={msg.patientFileName}
-                                        className="bg-[#008069] hover:bg-[#006a57] text-white text-[9px] px-2.5 py-1 rounded-lg font-black cursor-pointer transition-colors shrink-0"
-                                      >
-                                        دانلود فایل
-                                      </a>
-                                    </div>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-                          </React.Fragment>
+                          </div>
                         ))}
 
                       {messages.filter(m => m.patientId === currentUser.nationalId).length === 0 && (
@@ -4888,37 +5064,40 @@ export default function App() {
                           </div>
                         </div>
                       )}
+                      <div ref={patientMessagesEndRef} />
                     </div>
 
                     {/* Chat Input Bar - WhatsApp Style */}
-                    <form onSubmit={handleAskQuestion} className="p-3.5 bg-[#f0f2f5] border-t border-[#d1c7b7] space-y-3">
+                    <form onSubmit={handleAskQuestion} className="p-2.5 sm:p-3.5 bg-[#f0f2f5] border-t border-[#d1c7b7] space-y-2.5 sm:space-y-3 shrink-0 w-full min-w-0">
                       {/* Attachment Status Indicator */}
                       {newQuestionFileName && (
-                        <div className="flex items-center gap-2.5 bg-[#d9fdd3] border border-[#b2e2a8] px-3 py-2 rounded-xl text-xs text-[#005c4b] w-fit">
-                          <Paperclip className="w-3.5 h-3.5" />
-                          <span className="font-bold truncate max-w-[200px]">{newQuestionFileName}</span>
+                        <div className="flex items-center justify-between gap-2 bg-[#d9fdd3] border border-[#b2e2a8] px-2.5 py-1.5 rounded-xl text-xs text-[#005c4b] w-full max-w-full min-w-0">
+                          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                            <Paperclip className="w-3.5 h-3.5 shrink-0" />
+                            <span className="font-bold truncate text-[10px] sm:text-xs">{newQuestionFileName}</span>
+                          </div>
                           <button
                             type="button"
                             onClick={() => {
                               setNewQuestionFileName('');
                               setNewQuestionFileUrl('');
                             }}
-                            className="text-rose-600 hover:text-rose-700 font-black cursor-pointer text-[10px]"
+                            className="text-rose-600 hover:text-rose-700 font-black cursor-pointer text-[10px] shrink-0"
                           >
-                            ✖ حذف فایل
+                            ✖ حذف
                           </button>
                         </div>
                       )}
 
-                      <div className="flex items-center gap-2.5">
+                      <div className="flex items-center gap-1.5 sm:gap-2.5 w-full min-w-0">
                         {/* Hidden File Input Trigger */}
-                        <label className="flex items-center justify-center p-3 rounded-xl bg-white hover:bg-slate-100 text-[#54656f] cursor-pointer border border-[#d1c7b7] transition-colors shrink-0 shadow-sm">
+                        <label className="flex items-center justify-center p-2.5 sm:p-3 rounded-xl bg-white hover:bg-slate-100 text-[#54656f] cursor-pointer border border-[#d1c7b7] transition-colors shrink-0 shadow-sm" title="افزودن فایل ضمیمه">
                           <input
                             type="file"
                             className="hidden"
                             onChange={handlePatientFileChange}
                           />
-                          <Paperclip className="w-5 h-5 text-[#008069]" />
+                          <Paperclip className="w-4 h-4 sm:w-5 sm:h-5 text-[#008069]" />
                         </label>
 
                         {/* Input Field */}
@@ -4927,17 +5106,17 @@ export default function App() {
                           value={newQuestionText}
                           onChange={(e) => setNewQuestionText(e.target.value)}
                           placeholder="پیام خود را بنویسید..."
-                          className="flex-1 min-w-0 bg-white text-[#111b21] rounded-xl px-4 py-3 text-xs md:text-sm focus:outline-none focus:ring-2 focus:ring-[#00a884]/30 border border-[#d1c7b7] font-bold placeholder:text-[#8696a0] shadow-sm"
+                          className="flex-1 min-w-0 bg-white text-[#111b21] rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#00a884]/30 border border-[#d1c7b7] font-bold placeholder:text-[#8696a0] shadow-sm"
                         />
 
                         {/* Send Button */}
                         <button
                           type="submit"
                           disabled={!newQuestionText.trim()}
-                          className="bg-[#00a884] hover:bg-[#008f70] disabled:opacity-40 disabled:hover:bg-[#00a884] text-white font-black px-4 md:px-5 py-3 rounded-xl text-xs md:text-sm flex items-center gap-1.5 md:gap-2 transition-all cursor-pointer shadow-md active:scale-95 shrink-0"
+                          className="bg-[#00a884] hover:bg-[#008f70] disabled:opacity-40 disabled:hover:bg-[#00a884] text-white font-black px-3.5 sm:px-5 py-2.5 sm:py-3 rounded-xl text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer shadow-md active:scale-95 shrink-0"
                         >
                           <span className="hidden sm:inline">ارسال پیام</span>
-                          <span className="sm:hidden">ارسال</span>
+                          <span className="sm:hidden text-xs">ارسال</span>
                           <Send className="w-3.5 h-3.5" />
                         </button>
                       </div>
@@ -5403,7 +5582,7 @@ export default function App() {
                 </div>
               ) : (
                 /* Inside a specific workstation page with a warm, beautiful cream background (#faf6ed) */
-                <div className="bg-[#faf6ed] text-slate-900 border border-[#e2d7c3] shadow-xl rounded-2xl sm:rounded-[2.5rem] p-3 sm:p-8 space-y-6 sm:space-y-8 relative overflow-x-hidden w-full max-w-full">
+                <div className="text-slate-900 bg-[#faf6ed] border border-[#e2d7c3] shadow-xl rounded-2xl sm:rounded-[2.5rem] p-3 sm:p-8 space-y-4 sm:space-y-8 relative overflow-x-hidden w-full max-w-full">
                   {/* Decorative backdrop container safely masked to card borders */}
                   <div className="absolute inset-0 rounded-[2.5rem] overflow-hidden pointer-events-none z-0">
                     <div className="absolute top-0 right-0 w-64 h-64 bg-gradient-to-br from-indigo-500/10 via-sky-500/10 to-transparent rounded-full blur-3xl pointer-events-none" />
@@ -7994,12 +8173,12 @@ export default function App() {
                     const activePatientDisease = activePatientInfo ? diseases.find(d => d.id === activePatientInfo.diseaseId) : null;
 
                     return (
-                      <div className="h-[620px] rounded-3xl border border-[#d1c7b7] overflow-hidden bg-[#efeae2] flex flex-col md:flex-row shadow-sm">
+                      <div ref={adminChatWrapperRef} className="flex flex-col md:flex-row h-[380px] xs:h-[430px] sm:h-[650px] max-h-[calc(100dvh-220px)] sm:max-h-[800px] w-full rounded-2xl sm:rounded-3xl border border-[#d1c7b7] overflow-hidden bg-[#efeae2] shadow-sm">
 
                         {/* Right / List Column: Patients Thread List */}
                         <div className={`w-full md:w-80 border-l border-[#d1c7b7] flex flex-col bg-[#f0f2f5] shrink-0 ${activeChatPatientId ? 'hidden md:flex' : 'flex'}`}>
                           {/* Search & Header */}
-                          <div className="p-4 border-b border-[#d1c7b7] bg-[#075e54] text-white space-y-3">
+                          <div className="p-4 border-b border-[#d1c7b7] bg-[#075e54] text-white space-y-3 shrink-0">
                             <div className="flex items-center justify-between">
                               <h3 className="text-sm font-black text-white flex items-center gap-2">
                                 <MessageSquare className="w-4 h-4 text-emerald-300" />
@@ -8065,7 +8244,7 @@ export default function App() {
                           </div>
 
                           {/* List of Threads */}
-                          <div className="flex-1 overflow-y-auto divide-y divide-[#d1c7b7]">
+                          <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-[#d1c7b7]">
                             {filteredConvos.map((convo: any) => {
                               const isSelected = convo.patientId === activeChatPatientId;
                               const lastMsg = convo.messages[convo.messages.length - 1];
@@ -8120,34 +8299,34 @@ export default function App() {
                         </div>
 
                         {/* Left / Active Chat Conversation Window */}
-                        <div className={`flex-1 flex flex-col bg-[#efeae2] ${!activeChatPatientId ? 'hidden md:flex items-center justify-center' : 'flex'}`}>
+                        <div className={`flex-1 flex flex-col h-full min-h-0 bg-[#efeae2] min-w-0 ${!activeChatPatientId ? 'hidden md:flex items-center justify-center' : 'flex'}`}>
                           {activeChatPatientId && activeConvo ? (
                             <>
                               {/* Active Chat Header - WhatsApp Teal */}
-                              <div className="px-5 py-4 border-b border-[#004d40] bg-[#075e54] text-white flex justify-between items-center shadow-sm">
-                                <div className="flex items-center gap-3">
+                              <div className="px-3 sm:px-5 py-2.5 sm:py-4 border-b border-[#004d40] bg-[#075e54] text-white flex justify-between items-center shadow-sm min-w-0 w-full gap-2 shrink-0">
+                                <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
                                   <button
                                     onClick={() => setActiveChatPatientId(null)}
-                                    className="md:hidden text-white bg-white/10 hover:bg-white/20 border border-white/20 p-2 rounded-xl"
+                                    className="md:hidden text-white bg-white/10 hover:bg-white/20 border border-white/20 p-1.5 rounded-xl shrink-0"
                                   >
                                     <ArrowRight className="w-4 h-4" />
                                   </button>
-                                  <div>
-                                    <div className="flex items-center gap-2">
-                                      <h4 className="font-black text-white text-sm">{activeConvo.patientName}</h4>
-                                      <span className="text-[10px] font-mono bg-white/20 text-white border border-white/30 px-2.5 py-0.5 rounded-full font-black">
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+                                      <h4 className="font-black text-white text-xs sm:text-sm truncate">{activeConvo.patientName}</h4>
+                                      <span className="text-[9px] sm:text-[10px] font-mono bg-white/20 text-white border border-white/30 px-2 py-0.5 rounded-full font-black shrink-0">
                                         پرونده {activePatientInfo?.fileNumber || 'نامشخص'}
                                       </span>
                                     </div>
-                                    <div className="text-[10px] text-emerald-100 flex items-center gap-2.5 mt-1 font-bold">
+                                    <div className="text-[9px] sm:text-[10px] text-emerald-100 flex items-center gap-2 mt-0.5 font-bold truncate">
                                       <span>سن: {activePatientInfo?.age} سال</span>
                                       <span className="text-emerald-300">|</span>
-                                      <span>بیماری: <span className="text-white font-black">{activePatientDisease?.name || 'نامشخص'}</span></span>
+                                      <span className="truncate">بیماری: <span className="text-white font-black">{activePatientDisease?.name || 'نامشخص'}</span></span>
                                     </div>
                                   </div>
                                 </div>
 
-                                <div className="hidden sm:flex items-center gap-2 text-xs text-emerald-100">
+                                <div className="hidden sm:flex items-center gap-2 text-xs text-emerald-100 shrink-0">
                                   <span>آخرین بروزرسانی:</span>
                                   <span className="text-white font-mono font-black">
                                     {new Date(activeConvo.lastAskedAt).toLocaleDateString('fa-IR')}
@@ -8156,7 +8335,7 @@ export default function App() {
                               </div>
 
                               {/* Chat Scrollable Message Body */}
-                              <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-[#efeae2]">
+                              <div ref={adminChatContainerRef} className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-5 space-y-4 bg-[#efeae2] scroll-smooth w-full min-w-0">
                                 {sortedChatMessages.map((msg: Message) => {
                                   const isPatientMsg = !msg.answer || msg.question !== 'پیگیری روند درمان توسط پزشک';
 
@@ -8251,7 +8430,7 @@ export default function App() {
                                             ) : (
                                               <>
                                                 <div className="flex justify-between items-center text-[10px] text-[#005c4b] font-black border-b border-[#9fd794]/40 pb-1.5 mb-1">
-                                                  <span>{msg.answeredBy} (پاسخ دهنده)</span>
+                                                  <span>{formatResponderTitle(msg.answeredBy, msg.departmentId)} (پاسخ‌دهنده)</span>
                                                   <div className="flex items-center gap-2">
                                                     <button
                                                       onClick={() => {
@@ -8291,80 +8470,81 @@ export default function App() {
                                     </div>
                                   );
                                 })}
+                                <div ref={adminMessagesEndRef} />
                               </div>
 
                               {/* Active Chat Input Composer */}
-                              <div className="p-4 border-t border-[#d1c7b7] bg-[#f0f2f5] space-y-3">
+                              <div className="p-2 sm:p-3 border-t border-[#d1c7b7] bg-[#f0f2f5] space-y-1.5 sm:space-y-2 shrink-0 w-full min-w-0">
 
                                 {/* Replying state alert indicator */}
                                 {(() => {
                                   const unanswered = sortedChatMessages.find(m => !m.answer);
                                   return unanswered ? (
-                                    <div className="bg-[#fff9e6] border border-[#f0d886] text-[#8a6d12] rounded-xl px-3 py-2 text-[10px] font-black flex items-center justify-between">
-                                      <span>پاسخ به سوال بیمار: "{unanswered.question.substring(0, 50)}..."</span>
-                                      <span className="text-[#68520b]">بخش: {departments.find(d => d.id === unanswered.departmentId)?.name}</span>
+                                    <div className="bg-[#fff9e6] border border-[#f0d886] text-[#8a6d12] rounded-lg px-2.5 py-1 text-[10px] font-bold flex items-center justify-between gap-1 min-w-0">
+                                      <span className="truncate">پاسخ به: "{unanswered.question.substring(0, 35)}..."</span>
+                                      <span className="text-[#68520b] shrink-0 text-[9px] font-semibold">بخش: {departments.find(d => d.id === unanswered.departmentId)?.name}</span>
                                     </div>
                                   ) : (
-                                    <div className="bg-[#d9fdd3] border border-[#b2e2a8] text-[#005c4b] rounded-xl px-3 py-2 text-[10px] font-black">
-                                      بیمار سوال بدون پاسخی ندارد. در صورت تمایل می‌توانید یادداشت جدیدی جهت پیگیری روند درمان ارسال کنید.
+                                    <div className="bg-[#d9fdd3] border border-[#b2e2a8] text-[#005c4b] rounded-lg px-2.5 py-1 text-[10px] font-bold truncate">
+                                      ارسال یادداشت یا دستورالعمل مراقبتی جدید
                                     </div>
                                   );
                                 })()}
 
                                 {/* Attached composer file preview */}
                                 {chatInputFile && (
-                                  <div className="flex items-center gap-2 bg-[#d9fdd3] text-[#005c4b] text-[10px] px-3.5 py-2 rounded-xl border border-[#b2e2a8] w-fit">
-                                    <FileSpreadsheet className="w-4 h-4 shrink-0 text-[#008069]" />
-                                    <span className="font-bold max-w-[200px] truncate">{chatInputFile.name}</span>
+                                  <div className="flex items-center justify-between gap-2 bg-[#d9fdd3] text-[#005c4b] text-[10px] px-2.5 py-1 rounded-lg border border-[#b2e2a8] w-full min-w-0">
+                                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                      <Paperclip className="w-3.5 h-3.5 shrink-0 text-[#008069]" />
+                                      <span className="font-bold truncate">{chatInputFile.name}</span>
+                                    </div>
                                     <button
                                       type="button"
                                       onClick={() => setChatInputFile(null)}
-                                      className="text-rose-600 hover:text-rose-700 font-black cursor-pointer px-1"
+                                      className="text-rose-600 hover:text-rose-700 font-bold cursor-pointer text-[10px] shrink-0"
                                     >
-                                      ✕
+                                      ✕ حذف
                                     </button>
                                   </div>
                                 )}
 
                                 {/* Main Text Input Bar */}
-                                <div className="flex gap-3 items-end">
-                                  <div className="flex-1 bg-white border border-[#d1c7b7] rounded-2xl p-2 focus-within:border-[#00a884] transition-all flex flex-col gap-1">
-                                    <textarea
-                                      rows={2}
-                                      value={chatInputText}
-                                      onChange={(e) => setChatInputText(e.target.value)}
-                                      placeholder="پیام یا دستورالعمل مراقبتی خود را بنویسید..."
-                                      className="w-full text-xs bg-transparent border-none text-[#111b21] placeholder:text-[#8696a0] resize-none outline-none font-bold p-1 leading-relaxed"
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Enter' && !e.shiftKey) {
-                                          e.preventDefault();
-                                          handleSendChatMessage();
-                                        }
-                                      }}
+                                <div className="flex items-center gap-1.5 sm:gap-2 w-full min-w-0">
+                                  {/* File Attachment Trigger Button */}
+                                  <label className="flex items-center justify-center p-2 sm:p-2.5 rounded-xl bg-white hover:bg-slate-100 text-[#54656f] cursor-pointer border border-[#d1c7b7] transition-colors shrink-0 shadow-sm" title="افزودن فایل ضمیمه">
+                                    <Paperclip className="w-4 h-4 text-[#008069]" />
+                                    <input
+                                      type="file"
+                                      className="hidden"
+                                      onChange={handleChatFileChange}
                                     />
+                                  </label>
 
-                                    <div className="flex justify-between items-center pt-1 border-t border-slate-100">
-                                      {/* File Attachment Trigger Button */}
-                                      <label className="flex items-center gap-1.5 hover:bg-[#f0f2f5] px-2.5 py-1.5 rounded-lg text-[10px] font-black text-[#54656f] hover:text-[#111b21] cursor-pointer transition-all">
-                                        <Paperclip className="w-3.5 h-3.5 text-[#008069]" />
-                                        <span>افزودن فایل / دستورالعمل</span>
-                                        <input
-                                          type="file"
-                                          className="hidden"
-                                          onChange={handleChatFileChange}
-                                        />
-                                      </label>
+                                  {/* Text Input */}
+                                  <input
+                                    type="text"
+                                    value={chatInputText}
+                                    onChange={(e) => setChatInputText(e.target.value)}
+                                    placeholder="پیام یا دستورالعمل مراقبتی خود را بنویسید..."
+                                    className="flex-1 min-w-0 bg-white text-[#111b21] rounded-xl px-3 py-2 sm:py-2.5 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-[#00a884]/30 border border-[#d1c7b7] font-bold placeholder:text-[#8696a0] shadow-sm"
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        handleSendChatMessage();
+                                      }
+                                    }}
+                                  />
 
-                                      <span className="text-[9px] text-[#8696a0] font-mono">Shift+Enter برای خط جدید</span>
-                                    </div>
-                                  </div>
-
+                                  {/* Send Button */}
                                   <button
+                                    type="button"
                                     onClick={handleSendChatMessage}
-                                    className="bg-sky-600 hover:bg-sky-700 text-white font-black text-xs px-5 py-3.5 rounded-2xl shadow-sm transition-all flex items-center gap-2 cursor-pointer h-[50px]"
+                                    disabled={!chatInputText.trim() && !chatInputFile}
+                                    className="bg-[#00a884] hover:bg-[#008f70] disabled:opacity-40 disabled:hover:bg-[#00a884] text-white font-bold px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95 shrink-0"
                                   >
-                                    <span>ارسال</span>
-                                    <Send className="w-4 h-4 transform rotate-180 shrink-0" />
+                                    <span className="hidden sm:inline">ارسال</span>
+                                    <span className="sm:hidden text-xs">ارسال</span>
+                                    <Send className="w-3.5 h-3.5 shrink-0" />
                                   </button>
                                 </div>
 
